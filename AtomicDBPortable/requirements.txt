@@ -1,0 +1,23 @@
+# AtomicDB Portable Requirements
+# Windows x64 Distributed Computing Client for OpenBench / AtomicDB
+
+# Core GUI Framework
+PySide6>=6.5.0
+
+# Hardware & System Telemetry
+psutil>=5.9.5
+
+# Network, HTTP & Remote Management
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Cryptography, Tokens & Integrity
+cryptography>=42.0.0
+
+# Chess Logic & Syzygy Verification (upstream worker requirement)
+chess>=1.10.0
+
+# Packaging & Testing
+pyinstaller>=6.4.0
+pytest>=8.0.0
+pytest-mock>=3.12.0

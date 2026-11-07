@@ -1,0 +1,6 @@
+{
+  "name": "AtomicDB Portable & Fleet Console",
+  "description": "Self-contained USB-portable Windows x64 distributed computing client and central administrator fleet management dashboard for AtomicDB.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

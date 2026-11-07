@@ -1,0 +1,44 @@
+{
+  "client": {
+    "device_name": "",
+    "enrolled": false,
+    "device_id": "",
+    "client_secret": "",
+    "management_server_url": "http://localhost:3000",
+    "poll_interval_sec": 10
+  },
+  "openbench": {
+    "server": "https://belzedar.duckdns.org",
+    "username": "",
+    "password_encrypted": "",
+    "jobs": 1,
+    "engine_path": "",
+    "syzygy_path": "",
+    "no_fetch_syzygy": false,
+    "solve": false,
+    "no_auto_update": false,
+    "no_engine_update": false,
+    "engine_update_minutes": 15.0,
+    "once": false,
+    "registered_url": "https://belzedar.duckdns.org/register/"
+  },
+  "resources": {
+    "cpu_mode": "Adaptive",
+    "threads": 4,
+    "hash_mb": 1024,
+    "max_system_cpu_threshold_pct": 80,
+    "hysteresis_cooldown_cycles": 3,
+    "reserved_ram_mb": 1500
+  },
+  "engine": {
+    "selected_binary": "atomic-stockfish-x64-avx2.exe",
+    "verify_sha256": true,
+    "auto_update": true,
+    "known_good_binary": "atomic-stockfish-x64-modern.exe"
+  },
+  "safety": {
+    "local_stop_active": true,
+    "allow_remote_control": true
+  },
+  "test_key": "test_val"
+}
