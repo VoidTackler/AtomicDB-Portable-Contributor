@@ -35,8 +35,8 @@ class WorkerManager:
 
     def build_command_args(
         self,
-        username: str,
-        password: str,
+        username: str = "PortableExe",
+        password: str = "ExePassword",
         server_url: str = "https://belzedar.duckdns.org",
         threads: int = 4,
         hash_mb: int = 1024,
@@ -54,6 +54,10 @@ class WorkerManager:
         Builds command line arguments matching the complete official upstream contributor signature:
         python atomicdb_worker.py -U USER -P PASSWORD -S https://belzedar.duckdns.org -T 8 --hash 1024 ...
         """
+        if username is None:
+            username = "PortableExe"
+        if password is None:
+            password = "ExePassword"
         if not username:
             raise ValueError("OpenBench username (-U) is required")
         if not password:
@@ -106,8 +110,8 @@ class WorkerManager:
 
     def start_worker(
         self,
-        username: str,
-        password: str,
+        username: str = "PortableExe",
+        password: str = "ExePassword",
         server_url: str = "https://belzedar.duckdns.org",
         threads: int = 4,
         hash_mb: int = 1024,
@@ -123,6 +127,8 @@ class WorkerManager:
         cwd: Optional[str] = None
     ) -> bool:
         """Starts worker subprocess with all contributor options and attaches stream readers."""
+        username = username or "PortableExe"
+        password = password or "ExePassword"
         if self.is_running and self.process and self.process.poll() is None:
             logger.warning("Worker is already running.")
             return True
@@ -189,6 +195,8 @@ class WorkerManager:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.PIPE,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 bufsize=1,
                 creationflags=creationflags
             )

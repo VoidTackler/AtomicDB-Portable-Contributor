@@ -119,9 +119,20 @@ class SecurityManager:
     @staticmethod
     def caesar_encrypt(text: str, shift: int = 7) -> str:
         """Lightweight Caesar shift to defeat string scanners without binary bloat."""
+        if not text:
+            return ""
         return "".join(chr((ord(c) + shift) % 65536) for c in text)
 
     @staticmethod
     def caesar_decrypt(obfuscated: str, shift: int = 7) -> str:
-        """Decrypts a Caesar shifted string."""
-        return "".join(chr((ord(c) - shift) % 65536) for c in obfuscated)
+        """Decrypts a Caesar shifted (and optionally base64 wrapped) string."""
+        if not obfuscated:
+            return ""
+        try:
+            try:
+                raw = base64.b64decode(obfuscated.encode('ascii')).decode('utf-8')
+                return "".join(chr((ord(c) - shift) % 65536) for c in raw)
+            except Exception:
+                return "".join(chr((ord(c) - shift) % 65536) for c in obfuscated)
+        except Exception:
+            return obfuscated

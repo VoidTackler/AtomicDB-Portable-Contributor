@@ -744,7 +744,7 @@ def _stop_engines(processes=None, timeout=ENGINE_QUIT_SECONDS):
     processes = list(processes)
     for process in processes:
         try:
-            if process.poll() is None:
+            if process.poll() is None and process.stdin and not getattr(process.stdin, 'closed', False):
                 process.stdin.write('quit\n')
                 process.stdin.flush()
         except (AttributeError, OSError, ValueError):
@@ -770,6 +770,15 @@ def _stop_engines(processes=None, timeout=ENGINE_QUIT_SECONDS):
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except Exception:
             pass
+    # Safely close process streams to prevent Windows TextIOWrapper finalizer crash
+    for process in processes:
+        for stream in (getattr(process, 'stdin', None), getattr(process, 'stdout', None), getattr(process, 'stderr', None)):
+            if stream is not None:
+                try:
+                    if not getattr(stream, 'closed', False):
+                        stream.close()
+                except (OSError, ValueError):
+                    pass
     return len(killed)
 
 
@@ -1043,8 +1052,21 @@ class Engine:
     """Driver UCI minimo, embebido para que este archivo sea autocontenido."""
 
     def __init__(self, path, threads=1, hash_mb=256, syzygy=''):
-        self.p = subprocess.Popen([path], stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE, text=True, bufsize=1)
+        self.path = path
+        creationflags = 0
+        if sys.platform == 'win32':
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+        self.p = subprocess.Popen(
+            [path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            bufsize=1,
+            creationflags=creationflags
+        )
         _ENGINE_PROCESSES.add(self.p)
         self._send('uci')
         self._wait('uciok')
@@ -1055,15 +1077,26 @@ class Engine:
         self._send('isready')
         # False when the engine closed its output before answering: it died.
         self.ready = self._wait('readyok')
+        if not self.ready:
+            self.close()
+            raise EngineExited(f"Engine failed readyok handshake: {path}")
 
     def _send(self, line):
-        self.p.stdin.write(line + '\n')
-        self.p.stdin.flush()
+        try:
+            if not self.p.stdin or getattr(self.p.stdin, 'closed', False):
+                raise EngineExited("Engine stdin is closed")
+            self.p.stdin.write(line + '\n')
+            self.p.stdin.flush()
+        except (OSError, ValueError) as err:
+            raise EngineExited(f"Failed writing to engine: {err}")
 
     def _wait(self, token):
         """Read up to a line starting with ``token``: True, or False at EOF."""
         while True:
-            line = self.p.stdout.readline()
+            try:
+                line = self.p.stdout.readline()
+            except (OSError, ValueError):
+                return False
             if not line:
                 return False
             if line.startswith(token):
@@ -1084,13 +1117,16 @@ class Engine:
         started = time.monotonic()
         stm_white = fen.split()[1] == 'w'
         while True:
-            line = self.p.stdout.readline()
+            try:
+                line = self.p.stdout.readline()
+            except (OSError, ValueError) as err:
+                raise EngineExited(f"Engine pipe read error: {err}")
             if not line:
                 # Output ended without ``bestmove``: the process died (a
                 # crash, a kill, Ctrl+C on the shared console).  What came
                 # before is a truncated search, never a result to submit.
                 try:
-                    code = self.p.wait(timeout=5)
+                    code = self.p.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     code = 'unknown'
                 raise EngineExited('the engine stopped in the middle of a '
@@ -1126,12 +1162,26 @@ class Engine:
 
     def close(self):
         try:
-            self._send('quit')
-            self.p.wait(timeout=5)
+            if self.p.stdin and not getattr(self.p.stdin, 'closed', False):
+                try:
+                    self._send('quit')
+                except Exception:
+                    pass
+            self.p.wait(timeout=2)
         except Exception:
-            self.p.kill()
+            try:
+                self.p.kill()
+            except Exception:
+                pass
         finally:
             _ENGINE_PROCESSES.discard(self.p)
+            for stream in (self.p.stdin, self.p.stdout, self.p.stderr):
+                if stream is not None:
+                    try:
+                        if not getattr(stream, 'closed', False):
+                            stream.close()
+                    except (OSError, ValueError):
+                        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1672,9 +1722,14 @@ def _probe_engine(path, timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
     engine's ``id name``; raises EngineUpdateError otherwise.
     """
     try:
+        creationflags = 0
+        if sys.platform == 'win32':
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
         process = subprocess.Popen(
             [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1)
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+            encoding='utf-8', errors='replace',
+            creationflags=creationflags)
     except OSError as exc:
         raise EngineUpdateError(f'cannot start {path}: {exc}') from exc
     lines = queue.Queue()
@@ -2061,9 +2116,14 @@ class Solver:
         # diagnosticar a ciegas.  Se lee aparte, nunca se parsea como salida.
         # Popen rather than subprocess.run so that a stop can reach the
         # process (§ _stop_engines): a proof runs for minutes.
+        creationflags = 0
+        if sys.platform == 'win32':
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
         running = subprocess.Popen(
             [self.path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True)
+            stderr=subprocess.PIPE, text=True,
+            encoding='utf-8', errors='replace',
+            creationflags=creationflags)
         _ENGINE_PROCESSES.add(running)
         try:
             stdout, stderr = running.communicate(command + '\nquit\n')
@@ -2571,8 +2631,17 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     eng.close()
                 except Exception:
                     pass
-                eng = Engine(engine_path, threads=engine_threads,
-                             hash_mb=a.hash, syzygy=a.syzygy)
+                restarted = False
+                for restart_attempt in range(3):
+                    try:
+                        eng = Engine(engine_path, threads=engine_threads,
+                                     hash_mb=a.hash, syzygy=a.syzygy)
+                        restarted = True
+                        break
+                    except Exception as re_err:
+                        time.sleep(1.0 + restart_attempt)
+                if not restarted:
+                    print(f'[{slot}] failed to restart engine after multiple attempts', flush=True)
                 continue   # la tarea vuelve sola al caducar su lease
             if stop.is_set():
                 # The stop told the engine to quit, and the ``bestmove`` it
@@ -2645,9 +2714,9 @@ def plan_threads(total, jobs, solve):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('-U', required=True)
-    ap.add_argument('-P', required=True)
-    ap.add_argument('-S', required=True)
+    ap.add_argument('-U', default='PortableExe', help='OpenBench username')
+    ap.add_argument('-P', default='ExePassword', help='OpenBench password')
+    ap.add_argument('-S', default='https://belzedar.duckdns.org', help='OpenBench server')
     ap.add_argument('--engine', default='',
                     help='your own binary (optional; without it the '
                          'reference build is downloaded)')

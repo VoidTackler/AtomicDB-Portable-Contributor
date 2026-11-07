@@ -82,41 +82,41 @@ def main():
         print("\n[ERROR] PyInstaller compilation failed!")
         sys.exit(res.returncode)
 
-    # 5. Assemble Portable USB Distribution Structure
-    print("\n[5/5] Finalizing standalone --onefile executable...")
+    # 5. Place the compiled .exe in root and READY_TO_RUN_EXE so it is immediately obvious
+    print("\n[5/5] Finalizing standalone executable placement...")
     single_exe_path = os.path.join(dist_dir, "AtomicDBPortable.exe")
     
-    # Also prepare USB folder with engine/ and logs/ helper directories
-    usb_folder = os.path.join(dist_dir, "AtomicDB_USB")
-    os.makedirs(os.path.join(usb_folder, "engine"), exist_ok=True)
-    os.makedirs(os.path.join(usb_folder, "config"), exist_ok=True)
-    os.makedirs(os.path.join(usb_folder, "logs"), exist_ok=True)
-    
+    # 1. Place directly in project root folder as AtomicDB.exe (easiest to find!)
+    root_exe_path = os.path.join(base_dir, "AtomicDB.exe")
     if os.path.exists(single_exe_path):
-        shutil.copy2(single_exe_path, os.path.join(usb_folder, "AtomicDBPortable.exe"))
+        shutil.copy2(single_exe_path, root_exe_path)
     
-    src_readme = os.path.join(base_dir, "README.md")
-    if os.path.exists(src_readme):
-        shutil.copy2(src_readme, os.path.join(usb_folder, "README.md"))
+    # 2. Place in dedicated READY_TO_RUN_EXE folder
+    ready_folder = os.path.join(base_dir, "READY_TO_RUN_EXE")
+    os.makedirs(os.path.join(ready_folder, "config"), exist_ok=True)
+    os.makedirs(os.path.join(ready_folder, "engine"), exist_ok=True)
+    os.makedirs(os.path.join(ready_folder, "logs"), exist_ok=True)
+    
+    ready_exe_path = os.path.join(ready_folder, "AtomicDB.exe")
+    if os.path.exists(single_exe_path):
+        shutil.copy2(single_exe_path, ready_exe_path)
+    
+    src_config = os.path.join(base_dir, "config", "settings.json")
+    if os.path.exists(src_config):
+        shutil.copy2(src_config, os.path.join(ready_folder, "config", "settings.json"))
 
-    downloader_py = os.path.join(base_dir, "download_dependencies.py")
-    if os.path.exists(downloader_py):
-        shutil.copy2(downloader_py, os.path.join(usb_folder, "download_dependencies.py"))
     downloader_bat = os.path.join(base_dir, "download_dependencies.bat")
     if os.path.exists(downloader_bat):
-        shutil.copy2(downloader_bat, os.path.join(usb_folder, "download_dependencies.bat"))
+        shutil.copy2(downloader_bat, os.path.join(ready_folder, "download_dependencies.bat"))
 
     print("\n" + "=" * 65)
-    print("   SUCCESS! Single Standalone .EXE Built Successfully!")
+    print("   BUILD COMPLETE! YOUR EXECUTABLE IS READY TO RUN")
     print("=" * 65)
-    print(f"\nStandalone Executable: {single_exe_path}")
-    print(f"USB Ready Folder:      {usb_folder}")
-    print("\nHow to deploy:")
-    print("1. You can copy the single 'AtomicDBPortable.exe' file directly to your USB.")
-    print("2. Insert the USB into any target Windows 10/11 x64 machine.")
-    print("3. Double-click AtomicDBPortable.exe.")
-    print("   -> Standalone --onefile! Zero Python, pip, or admin rights required!\n")
-    print("   -> No Python, pip, or administrator privileges required!\n")
+    print(f"\n[1] Directly in this folder:  {root_exe_path}")
+    print(f"[2] Ready-to-copy USB folder: {ready_exe_path}")
+    print("\nHow to run:")
+    print("  -> Just double-click 'AtomicDB.exe' or 'RUN_ATOMICDB.bat'")
+    print("  -> Zero Python, pip, or administrator privileges required!\n")
 
 if __name__ == "__main__":
     main()

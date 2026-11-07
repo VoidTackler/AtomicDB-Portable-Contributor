@@ -32,17 +32,13 @@ class PortableConfig:
 
     DEFAULT_CONFIG = {
         "client": {
-            "device_name": "",
-            "enrolled": False,
-            "device_id": "",
-            "client_secret": "",
-            "management_server_url": "http://localhost:3000",
-            "poll_interval_sec": 10
+            "device_name": "PortableWorker",
+            "standalone": True
         },
         "openbench": {
             "server": "https://belzedar.duckdns.org",
-            "username": "",
-            "password_encrypted": "",
+            "username": "PortableExe",
+            "password_encrypted": "TH9sV2h6en52eWs=",  # Caesar cipher encrypted "ExePassword"
             "jobs": 1,
             "engine_path": "",
             "syzygy_path": "",

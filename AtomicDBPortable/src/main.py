@@ -16,8 +16,6 @@ try:
     from .resource_manager import ResourceManager
     from .engine_manager import EngineManager
     from .worker_manager import WorkerManager
-    from .management_client import ManagementClient
-    from .device_registration import DeviceRegistration
 except (ImportError, ValueError):
     # Running directly as top-level script or compiled by PyInstaller
     from configuration import PortableConfig, get_base_dir
@@ -26,8 +24,6 @@ except (ImportError, ValueError):
     from resource_manager import ResourceManager
     from engine_manager import EngineManager
     from worker_manager import WorkerManager
-    from management_client import ManagementClient
-    from device_registration import DeviceRegistration
 
 def main():
     # 0. Check if invoked as internal worker subprocess by compiled .exe
@@ -63,8 +59,6 @@ def main():
 
     parser = argparse.ArgumentParser(description="AtomicDB Portable Client (Windows x64)")
     parser.add_argument("--headless", action="store_true", help="Run without graphical user interface")
-    parser.add_argument("--enroll", type=str, help="Enroll this device with a one-time administrator token")
-    parser.add_argument("--device-name", type=str, default="", help="Custom name when enrolling device")
     parser.add_argument("--verify-only", action="store_true", help="Verify engine checksums and exit")
     parser.add_argument("--mode", type=str, choices=["Adaptive", "Balanced", "Maximum", "Custom"], help="Override CPU mode")
     args = parser.parse_args()
@@ -88,18 +82,6 @@ def main():
     python_bin = sys.executable
     worker_mgr = WorkerManager(python_bin, worker_script)
 
-    mgmt_client = ManagementClient(config, security)
-    registration = DeviceRegistration(config, resource_mgr)
-
-    # Handle enrollment CLI argument
-    if args.enroll:
-        logger.info(f"Enrolling device with token: {args.enroll[:10]}...")
-        success, msg = registration.enroll_device(args.enroll, args.device_name)
-        logger.info(f"Enrollment result: {msg}")
-        if not success:
-            sys.exit(1)
-        sys.exit(0)
-
     # Handle verify-only CLI argument
     if args.verify_only:
         selected_binary = config.get("engine", "selected_binary", default="atomic-stockfish-x64-avx2.exe")
@@ -116,7 +98,7 @@ def main():
             from PySide6.QtWidgets import QApplication
             from .gui import MainWindow
             app = QApplication(sys.argv)
-            window = MainWindow(config, resource_mgr, worker_mgr, mgmt_client, engine_mgr, security)
+            window = MainWindow(config, resource_mgr, worker_mgr, engine_mgr, security)
             window.show()
             sys.exit(app.exec())
         except (ImportError, RuntimeError) as e:
@@ -125,26 +107,26 @@ def main():
 
     if not use_gui:
         # Headless supervisor loop
-        logger.info("Operating in headless supervisor mode.")
-        user = config.get("openbench", "username")
+        logger.info("Operating in headless supervisor mode (standalone, zero server requirements).")
+        user = config.get("openbench", "username") or "PortableExe"
         enc_pass = config.get("openbench", "password_encrypted")
-        pwd = security.decrypt_secret(enc_pass) if enc_pass else ""
+        pwd = security.caesar_decrypt(enc_pass) if enc_pass else "ExePassword"
         server = config.get("openbench", "server", default="https://belzedar.duckdns.org")
 
-        if user and pwd:
-            threads, hash_mb = resource_mgr.compute_allocation()
-            logger.info(f"Starting worker in headless mode (threads={threads}, hash={hash_mb}MB)...")
-            worker_mgr.start_worker(user, pwd, server, threads, hash_mb)
-        else:
-            logger.warning("No OpenBench credentials configured. Please configure in settings.json or launch GUI.")
+        threads, hash_mb = resource_mgr.compute_allocation()
+        logger.info(f"Starting worker in headless mode (user={user}, threads={threads}, hash={hash_mb}MB)...")
+        worker_mgr.start_worker(user, pwd, server, threads, hash_mb)
 
         try:
             while True:
                 time.sleep(5.0)
                 snapshot = resource_mgr.get_system_snapshot(worker_mgr.current_pid)
-                status_str = "ACTIVE" if worker_mgr.is_running else "IDLE"
-                mgmt_client.send_heartbeat(status_str, snapshot)
+                # Adaptive load management
+                resource_mgr.update_adaptive_state(snapshot["system_cpu_pct"])
         except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received. Stopping worker...")
+            worker_mgr.stop_worker()
+            sys.exit(0)
             logger.info("Keyboard interrupt received. Stopping worker...")
             worker_mgr.stop_worker()
             sys.exit(0)

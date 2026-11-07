@@ -30,14 +30,12 @@ try:
     from .configuration import PortableConfig
     from .resource_manager import ResourceManager
     from .worker_manager import WorkerManager
-    from .management_client import ManagementClient
     from .engine_manager import EngineManager
     from .security import SecurityManager
 except (ImportError, ValueError):
     from configuration import PortableConfig
     from resource_manager import ResourceManager
     from worker_manager import WorkerManager
-    from management_client import ManagementClient
     from engine_manager import EngineManager
     from security import SecurityManager
 
@@ -50,8 +48,8 @@ class MainWindow(QMainWindow if HAS_QT else object):
     """Main PySide6 Window for AtomicDB Portable Client."""
 
     def __init__(self, config: PortableConfig, resource_mgr: ResourceManager,
-                 worker_mgr: WorkerManager, mgmt_client: ManagementClient,
-                 engine_mgr: EngineManager, security: SecurityManager):
+                 worker_mgr: WorkerManager, engine_mgr: EngineManager,
+                 security: SecurityManager):
         if not HAS_QT:
             raise RuntimeError("PySide6 is required to launch graphical interface.")
         super().__init__()
@@ -59,18 +57,11 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.config = config
         self.resource_mgr = resource_mgr
         self.worker_mgr = worker_mgr
-        self.mgmt_client = mgmt_client
         self.engine_mgr = engine_mgr
         self.security = security
 
         self.signals = WorkerSignals()
         self.worker_mgr.add_log_callback(self.signals.log_received.emit)
-
-        # Wire remote management hooks
-        self.mgmt_client.on_pause_requested = self._handle_remote_pause
-        self.mgmt_client.on_resume_requested = self._handle_remote_resume
-        self.mgmt_client.on_config_updated = self._handle_remote_config_update
-        self.mgmt_client.on_revocation_triggered = self._handle_remote_revocation
 
         self.setWindowTitle("AtomicDB Portable — Windows x64 Computing Client")
         self.setMinimumSize(940, 780)
@@ -193,8 +184,8 @@ class MainWindow(QMainWindow if HAS_QT else object):
         title_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #f8fafc; letter-spacing: 0.5px;")
         header.addWidget(title_label)
 
-        self.lbl_server_status = QLabel("Server: Connecting...")
-        self.lbl_server_status.setStyleSheet("color: #94a3b8; font-family: monospace;")
+        self.lbl_server_status = QLabel("Mode: Standalone Client (Zero Remote Server Required)")
+        self.lbl_server_status.setStyleSheet("color: #38bdf8; font-family: monospace;")
         header.addStretch()
         header.addWidget(self.lbl_server_status)
         main_layout.addLayout(header)
@@ -247,22 +238,26 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.txt_server.textChanged.connect(self._update_cmd_preview)
         grid_top.addWidget(self.txt_server, 0, 1)
 
-        # -U / --user
+        # -U / --user (Fixed to "PortableExe")
         grid_top.addWidget(QLabel("Username (-U):"), 0, 2)
         self.txt_user = QLineEdit()
-        self.txt_user.setPlaceholderText("Belzedar OpenBench username")
-        self.txt_user.setText(self.config.get("openbench", "username", default=""))
+        self.txt_user.setText("PortableExe")
+        self.txt_user.setReadOnly(True)
+        self.txt_user.setStyleSheet("background-color: #0f172a; color: #38bdf8; font-weight: bold;")
+        self.txt_user.setToolTip("Fixed OpenBench contributor username: PortableExe")
         self.txt_user.textChanged.connect(self._update_cmd_preview)
         grid_top.addWidget(self.txt_user, 0, 3)
 
-        # -P / --password
+        # -P / --password (Fixed to "ExePassword", encrypted in configuration)
         grid_top.addWidget(QLabel("Password (-P):"), 0, 4)
         self.txt_pass = QLineEdit()
         self.txt_pass.setEchoMode(QLineEdit.Password)
-        self.txt_pass.setPlaceholderText("Account password")
         stored_enc = self.config.get("openbench", "password_encrypted", default="")
-        if stored_enc:
-            self.txt_pass.setText(self.security.decrypt_secret(stored_enc))
+        decrypted_pwd = self.security.caesar_decrypt(stored_enc) if stored_enc else "ExePassword"
+        self.txt_pass.setText(decrypted_pwd or "ExePassword")
+        self.txt_pass.setReadOnly(True)
+        self.txt_pass.setStyleSheet("background-color: #0f172a; color: #94a3b8;")
+        self.txt_pass.setToolTip("Fixed OpenBench contributor password (encrypted via Caesar cipher in config)")
         self.txt_pass.textChanged.connect(self._update_cmd_preview)
         grid_top.addWidget(self.txt_pass, 0, 5)
 
@@ -502,30 +497,14 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         # Telemetry to central management server
         status_str = "ACTIVE" if self.worker_mgr.is_running else "IDLE"
+        status_str = "ACTIVE" if self.worker_mgr.is_running else "IDLE"
         if snapshot["is_throttled"]:
             status_str = "THROTTLED"
 
-        metrics = {
-            "systemCpuPct": snapshot["system_cpu_pct"],
-            "workerCpuPct": snapshot["worker_cpu_pct"],
-            "ramUsedMb": ram_used,
-            "threadsAllocated": self.spin_threads.value(),
-            "hashAllocatedMb": self.spin_hash.value(),
-            "taskSpeedNps": int(self.spin_threads.value() * 1250000) if self.worker_mgr.is_running else 0
-        }
-
-        self.mgmt_client.send_heartbeat(status_str, metrics)
-        conn_text = "Connected (Admin Synced)" if self.mgmt_client.is_connected else "Offline / Standalone"
-        self.lbl_server_status.setText(f"Management: {conn_text}")
-
     def _start_worker(self):
-        user = self.txt_user.text().strip()
-        pwd = self.txt_pass.text().strip()
+        user = "PortableExe"
+        pwd = self.txt_pass.text().strip() or "ExePassword"
         server_url = self.txt_server.text().strip() or "https://belzedar.duckdns.org"
-
-        if not user or not pwd:
-            QMessageBox.warning(self, "Missing Credentials", "Please enter your OpenBench username and password.")
-            return
 
         threads = self.spin_threads.value()
         hash_mb = self.spin_hash.value()
@@ -539,10 +518,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
         engine_update_min = self.spin_engine_update_min.value()
         once = self.chk_once.isChecked()
 
-        # Save all settings securely into portable configuration
+        # Save all settings into portable configuration (password encrypted with Caesar cipher)
         self.config.set("openbench", "server", server_url)
-        self.config.set("openbench", "username", user)
-        self.config.set("openbench", "password_encrypted", self.security.encrypt_secret(pwd))
+        self.config.set("openbench", "username", "PortableExe")
+        self.config.set("openbench", "password_encrypted", self.security.caesar_encrypt(pwd))
         self.config.set("openbench", "jobs", jobs)
         self.config.set("openbench", "engine_path", engine_path)
         self.config.set("openbench", "syzygy_path", syzygy_path)
@@ -582,45 +561,3 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
     def _append_log(self, text: str):
         self.console.append(text)
-
-    # Remote Management Handlers
-    def _handle_remote_pause(self):
-        self._append_log("[REMOTE] Received PAUSE command from central administrator.")
-        self._stop_worker()
-
-    def _handle_remote_resume(self):
-        if self.config.get("safety", "local_stop_active", default=False):
-            self._append_log("[REMOTE] Ignored RESUME command: Local Stop override is engaged.")
-            return
-        self._append_log("[REMOTE] Received RESUME command from central administrator.")
-        self._start_worker()
-
-    def _handle_remote_config_update(self, payload: dict):
-        self._append_log(f"[REMOTE] Config update received: {payload}")
-        if "threads" in payload:
-            self.spin_threads.setValue(int(payload["threads"]))
-        if "hash" in payload:
-            self.spin_hash.setValue(int(payload["hash"]))
-        if "jobs" in payload:
-            self.spin_jobs.setValue(int(payload["jobs"]))
-        if "cpuMode" in payload:
-            self.combo_mode.setCurrentText(payload["cpuMode"])
-        if "noFetchSyzygy" in payload:
-            self.chk_no_fetch_syzygy.setChecked(bool(payload["noFetchSyzygy"]))
-        if "solve" in payload:
-            self.chk_solve.setChecked(bool(payload["solve"]))
-        if "noAutoUpdate" in payload:
-            self.chk_no_auto_update.setChecked(bool(payload["noAutoUpdate"]))
-        if "noEngineUpdate" in payload:
-            self.chk_no_engine_update.setChecked(bool(payload["noEngineUpdate"]))
-        if "engineUpdateMinutes" in payload:
-            self.spin_engine_update_min.setValue(float(payload["engineUpdateMinutes"]))
-        if "once" in payload:
-            self.chk_once.setChecked(bool(payload["once"]))
-        self._update_cmd_preview()
-
-    def _handle_remote_revocation(self):
-        self._append_log("[CRITICAL] Device credentials revoked by administrator. Terminating analysis.")
-        self._stop_worker()
-        self.btn_start.setEnabled(False)
-        QMessageBox.critical(self, "Authorization Revoked", "This device has been revoked by the central administrator.")
