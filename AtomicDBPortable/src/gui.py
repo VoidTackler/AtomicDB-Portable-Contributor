@@ -227,7 +227,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         cfg_box = QGroupBox("OPENBENCH CONTRIBUTOR API PARAMETERS (UPSTREAM VARIABLES)")
         cfg_layout = QVBoxLayout(cfg_box)
 
-        # 1. Credentials & Server (Text Inputs)
+        # 1. Server URL & Engine paths (Credentials hidden from UI)
         grid_top = QGridLayout()
 
         # -S / --server
@@ -238,44 +238,21 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.txt_server.textChanged.connect(self._update_cmd_preview)
         grid_top.addWidget(self.txt_server, 0, 1)
 
-        # -U / --user (Fixed to "PortableExe")
-        grid_top.addWidget(QLabel("Username (-U):"), 0, 2)
-        self.txt_user = QLineEdit()
-        self.txt_user.setText("PortableExe")
-        self.txt_user.setReadOnly(True)
-        self.txt_user.setStyleSheet("background-color: #0f172a; color: #38bdf8; font-weight: bold;")
-        self.txt_user.setToolTip("Fixed OpenBench contributor username: PortableExe")
-        self.txt_user.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_user, 0, 3)
-
-        # -P / --password (Fixed to "ExePassword", encrypted in configuration)
-        grid_top.addWidget(QLabel("Password (-P):"), 0, 4)
-        self.txt_pass = QLineEdit()
-        self.txt_pass.setEchoMode(QLineEdit.Password)
-        stored_enc = self.config.get("openbench", "password_encrypted", default="")
-        decrypted_pwd = self.security.caesar_decrypt(stored_enc) if stored_enc else "ExePassword"
-        self.txt_pass.setText(decrypted_pwd or "ExePassword")
-        self.txt_pass.setReadOnly(True)
-        self.txt_pass.setStyleSheet("background-color: #0f172a; color: #94a3b8;")
-        self.txt_pass.setToolTip("Fixed OpenBench contributor password (encrypted via Caesar cipher in config)")
-        self.txt_pass.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_pass, 0, 5)
-
         # --engine
-        grid_top.addWidget(QLabel("Custom Engine (--engine):"), 1, 0)
+        grid_top.addWidget(QLabel("Custom Engine (--engine):"), 0, 2)
         self.txt_engine = QLineEdit()
         self.txt_engine.setPlaceholderText("Optional path to custom engine binary (blank = default)")
         self.txt_engine.setText(self.config.get("openbench", "engine_path", default=""))
         self.txt_engine.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_engine, 1, 1, 1, 2)
+        grid_top.addWidget(self.txt_engine, 0, 3)
 
         # --syzygy
-        grid_top.addWidget(QLabel("Syzygy TBs (--syzygy):"), 1, 3)
+        grid_top.addWidget(QLabel("Syzygy TBs (--syzygy):"), 1, 0)
         self.txt_syzygy = QLineEdit()
         self.txt_syzygy.setPlaceholderText("Directories separated by ; (e.g. C:\\syzygy;D:\\tb)")
         self.txt_syzygy.setText(self.config.get("openbench", "syzygy_path", default=""))
         self.txt_syzygy.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_syzygy, 1, 4, 1, 2)
+        grid_top.addWidget(self.txt_syzygy, 1, 1, 1, 3)
 
         cfg_layout.addLayout(grid_top)
 
@@ -386,8 +363,8 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.btn_stop.setEnabled(False)
         ctrl_layout.addWidget(self.btn_stop)
 
-        # CRITICAL REQUIREMENT: Local stop takes precedence over remote resume!
-        self.btn_local_stop = QPushButton("EMERGENCY LOCAL STOP (Precedence Over Remote)")
+        # Emergency stop button
+        self.btn_local_stop = QPushButton("EMERGENCY STOP (Instant Halt)")
         self.btn_local_stop.setObjectName("btnLocalStop")
         self.btn_local_stop.setCheckable(True)
         is_local_stopped = self.config.get("safety", "local_stop_active", default=False)
@@ -410,9 +387,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.signals.log_received.connect(self._append_log)
 
     def _update_cmd_preview(self):
-        """Generates real-time preview of the exact invocation command."""
-        user = self.txt_user.text().strip() or "USER"
-        pwd = "********" if self.txt_pass.text() else "PASSWORD"
+        """Generates real-time preview of the exact invocation command (credentials hidden)."""
         srv = self.txt_server.text().strip() or "https://belzedar.duckdns.org"
         t = self.spin_threads.value()
         h = self.spin_hash.value()
@@ -423,8 +398,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         parts = [
             "python atomicdb_worker.py",
-            f"-U {user}",
-            f"-P {pwd}",
             f"-S {srv}",
             f"-T {t}",
             f"--hash {h}"
@@ -452,20 +425,20 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
     def _update_local_stop_button_text(self, stopped: bool):
         if stopped:
-            self.btn_local_stop.setText("LOCAL STOP ACTIVE (Remote Commands Locked Out)")
+            self.btn_local_stop.setText("EMERGENCY STOP ENGAGED (Worker Halted)")
             self.btn_local_stop.setStyleSheet("background-color: #e11d48; font-weight: bold; border: 2px solid white;")
         else:
-            self.btn_local_stop.setText("Engage Local Stop Override")
+            self.btn_local_stop.setText("Emergency Stop (Instant Halt)")
             self.btn_local_stop.setStyleSheet("background-color: #475569;")
 
     def _on_local_stop_toggled(self, checked: bool):
         self.config.set("safety", "local_stop_active", checked)
         self._update_local_stop_button_text(checked)
         if checked:
-            self._append_log("[SAFETY] Local host operator engaged Local Stop. Worker stopped. Remote RESUME commands are strictly disabled.")
+            self._append_log("[SAFETY] Emergency Stop engaged. Worker halted.")
             self._stop_worker()
         else:
-            self._append_log("[SAFETY] Local Stop Override disengaged by host operator.")
+            self._append_log("[SAFETY] Emergency Stop disengaged.")
 
     def _on_mode_changed(self, mode: str):
         self.config.set("resources", "cpu_mode", mode)
@@ -495,15 +468,20 @@ class MainWindow(QMainWindow if HAS_QT else object):
         avail_ram = snapshot["available_ram_mb"]
         self.lbl_ram_details.setText(f"Worker RSS: {ram_used} MB | Host Avail: {avail_ram} MB")
 
-        # Telemetry to central management server
-        status_str = "ACTIVE" if self.worker_mgr.is_running else "IDLE"
         status_str = "ACTIVE" if self.worker_mgr.is_running else "IDLE"
         if snapshot["is_throttled"]:
             status_str = "THROTTLED"
 
+        # Auto-restore buttons if worker stopped
+        if not self.worker_mgr.is_running and self.btn_stop.isEnabled():
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+
     def _start_worker(self):
         user = "PortableExe"
-        pwd = self.txt_pass.text().strip() or "ExePassword"
+        stored_enc = self.config.get("openbench", "password_encrypted", default="")
+        pwd = self.security.caesar_decrypt(stored_enc) if stored_enc else "ExePassword"
+        pwd = pwd or "ExePassword"
         server_url = self.txt_server.text().strip() or "https://belzedar.duckdns.org"
 
         threads = self.spin_threads.value()

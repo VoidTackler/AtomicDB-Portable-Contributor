@@ -240,6 +240,9 @@ class WorkerManager:
                     self._broadcast_log("[SUPERVISOR] Process ended cleanly.")
             except Exception as e:
                 logger.debug(f"Reader thread exited: {e}")
+            finally:
+                self.is_running = False
+                self.current_pid = None
 
         self._reader_thread = threading.Thread(target=reader, daemon=True)
         self._reader_thread.start()

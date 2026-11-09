@@ -64,48 +64,7 @@ class SecurityManager:
         self.last_monotonic_nonce += 1
         return self.last_monotonic_nonce
 
-    def sign_payload(self, payload: Dict[str, Any], secret_hex: str) -> str:
-        """Produces HMAC-SHA256 hex digest of a JSON dictionary."""
-        data_str = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-        secret = bytes.fromhex(secret_hex) if len(secret_hex) == 64 else secret_hex.encode('utf-8')
-        return hmac.new(secret, data_str.encode('utf-8'), hashlib.sha256).hexdigest()
 
-    def verify_command_signature(self, command_dict: Dict[str, Any], admin_secret_hex: str) -> Tuple[bool, str]:
-        """
-        Validates HMAC signature and timestamp validity window of incoming admin command.
-        Prevents tampering and expired executions.
-        """
-        signature = command_dict.get('signature')
-        if not signature:
-            return False, "Missing signature"
-
-        # Check expiration
-        expires_at = command_dict.get('expiresAt')
-        if expires_at:
-            try:
-                # ISO parsing fallback
-                exp_ts = time.mktime(time.strptime(expires_at[:19], "%Y-%m-%dT%H:%M:%S"))
-                if time.time() > exp_ts:
-                    return False, "Command has expired"
-            except Exception:
-                pass
-
-        # Reconstruct canonical payload for signature check
-        canonical = {
-            'commandId': command_dict.get('id'),
-            'targetId': command_dict.get('deviceId'),
-            'commandType': command_dict.get('commandType'),
-            'payload': command_dict.get('payload', {}),
-            'issuedAt': command_dict.get('issuedAt'),
-            'expiresAt': command_dict.get('expiresAt')
-        }
-
-        # Verify HMAC
-        expected_sig = self.sign_payload(canonical, admin_secret_hex)
-        if hmac.compare_digest(signature, expected_sig):
-            return True, "Valid"
-        else:
-            return False, "Cryptographic signature mismatch"
 
     @staticmethod
     def calculate_file_sha256(file_path: str) -> str:
@@ -129,10 +88,14 @@ class SecurityManager:
         if not obfuscated:
             return ""
         try:
-            try:
-                raw = base64.b64decode(obfuscated.encode('ascii')).decode('utf-8')
-                return "".join(chr((ord(c) - shift) % 65536) for c in raw)
-            except Exception:
-                return "".join(chr((ord(c) - shift) % 65536) for c in obfuscated)
+            if obfuscated.endswith("=") or (len(obfuscated) % 4 == 0 and not any(c in obfuscated for c in ":<>~")):
+                try:
+                    raw = base64.b64decode(obfuscated.encode('ascii')).decode('utf-8')
+                    cand = "".join(chr((ord(c) - shift) % 65536) for c in raw)
+                    if all(32 <= ord(c) <= 126 for c in cand):
+                        return cand
+                except Exception:
+                    pass
+            return "".join(chr((ord(c) - shift) % 65536) for c in obfuscated)
         except Exception:
             return obfuscated

@@ -1316,7 +1316,15 @@ def syzygy_dir(script_path=None):
     if getattr(sys, 'frozen', False):
         base = Path(sys.executable).resolve().parent
         return base / SYZYGY_DIR_NAME
-    base = Path(script_path or __file__).resolve().parent
+
+    # Guard against PyInstaller temp extraction dir (_MEI...) or host AppData
+    cand = Path(script_path or __file__).resolve()
+    if hasattr(sys, '_MEIPASS') or '_MEI' in str(cand) or 'AppData' in str(cand):
+        if getattr(sys, 'executable', None) and 'python' not in Path(sys.executable).name.lower():
+            return Path(sys.executable).resolve().parent / SYZYGY_DIR_NAME
+        return Path.cwd() / SYZYGY_DIR_NAME
+
+    base = cand.parent
     return base / SYZYGY_DIR_NAME
 
 
@@ -2729,9 +2737,10 @@ def main():
     ap.add_argument('--syzygy', default='',
                     help='atomic TB dirs separated by ; (when given, it is '
                          'used as-is and nothing is downloaded)')
-    ap.add_argument('--no-fetch-syzygy', action='store_true',
-                    help=f'do not download the {SYZYGY_SET} set (1.3 GB) '
-                         'when --syzygy was not given')
+    ap.add_argument('--no-fetch-syzygy', dest='no_fetch_syzygy', action='store_true', default=True,
+                    help=f'do not download the {SYZYGY_SET} set (1.3 GB) [default: True]')
+    ap.add_argument('--fetch-syzygy', dest='no_fetch_syzygy', action='store_false',
+                    help=f'explicitly download the {SYZYGY_SET} set (1.3 GB) to USB disk')
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--no-auto-update', action='store_true',
                     help='do not update this file from the official server')

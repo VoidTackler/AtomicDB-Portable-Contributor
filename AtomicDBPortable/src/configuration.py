@@ -47,8 +47,7 @@ class PortableConfig:
             "no_auto_update": False,
             "no_engine_update": False,
             "engine_update_minutes": 15.0,
-            "once": False,
-            "registered_url": "https://belzedar.duckdns.org/register/"
+            "once": False
         },
         "resources": {
             "cpu_mode": "Adaptive",  # Default MUST be Adaptive per specifications
@@ -65,8 +64,7 @@ class PortableConfig:
             "known_good_binary": "atomic-stockfish-x64-modern.exe"
         },
         "safety": {
-            "local_stop_active": False,
-            "allow_remote_control": True
+            "local_stop_active": False
         }
     }
 

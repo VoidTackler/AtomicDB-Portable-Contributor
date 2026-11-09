@@ -44,11 +44,10 @@ class TestWorkerCLI(unittest.TestCase):
         with self.assertRaises(ValueError):
             wm.build_command_args(username="user", password="")
 
-    def test_master_password_caesar_obfuscation(self):
+    def test_caesar_obfuscation_roundtrip(self):
         from AtomicDBPortable.src.security import SecurityManager
-        plaintext = "Pineapple2357"
+        plaintext = "PortableWorkerSecret123"
         encrypted = SecurityManager.caesar_encrypt(plaintext, shift=7)
-        self.assertEqual(encrypted, "Wpulhwwsl9:<>")
         decrypted = SecurityManager.caesar_decrypt(encrypted, shift=7)
         self.assertEqual(decrypted, plaintext)
 

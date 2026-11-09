@@ -127,9 +127,6 @@ def main():
             logger.info("Keyboard interrupt received. Stopping worker...")
             worker_mgr.stop_worker()
             sys.exit(0)
-            logger.info("Keyboard interrupt received. Stopping worker...")
-            worker_mgr.stop_worker()
-            sys.exit(0)
 
 if __name__ == "__main__":
     main()

@@ -6,8 +6,6 @@ import {
   ShieldCheck,
   CheckCircle2,
   Copy,
-  ExternalLink,
-  Lock,
   Cpu,
   Layers,
   HardDrive,
@@ -37,15 +35,11 @@ export default function App() {
   const [customSyzygy, setCustomSyzygy] = useState('');
 
   const serverUrl = 'https://belzedar.duckdns.org';
-  const fixedUsername = 'PortableExe';
-  const fixedPasswordEncrypted = 'TH9sV2h6en52eWs='; // Caesar shifted "ExePassword"
 
-  // Compute live command string
+  // Compute live command string (credentials hidden from UI)
   const commandPreview = [
     'AtomicDB.exe',
     '--exec-worker',
-    `-U ${fixedUsername}`,
-    '-P ********',
     `-S ${serverUrl}`,
     `-T ${threads}`,
     `--hash ${hashMb}`,
@@ -103,15 +97,6 @@ export default function App() {
               <Download className="w-4 h-4" />
               {downloading ? 'Preparing Package...' : 'Download USB Package (.zip)'}
             </button>
-            <a
-              href="https://belzedar.duckdns.org"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors border border-slate-700"
-            >
-              <span>AtomicDB Server</span>
-              <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
-            </a>
           </div>
         </div>
       </header>
@@ -134,13 +119,13 @@ export default function App() {
           </div>
 
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-start gap-3">
-            <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/20 shrink-0">
-              <Lock className="w-5 h-5" />
+            <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20 shrink-0">
+              <Cpu className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-white">Fixed & Encrypted Credentials</h3>
+              <h3 className="text-sm font-semibold text-white">Adaptive Hardware Control</h3>
               <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                Pre-configured for <span className="text-purple-300 font-mono font-bold">PortableExe</span> with password encrypted via Caesar cipher to defeat scanner mining.
+                Dynamically regulates thread execution based on host CPU activity, keeping machines completely responsive.
               </p>
             </div>
           </div>
@@ -279,9 +264,9 @@ export default function App() {
                       2
                     </div>
                     <div>
-                      <h4 className="text-sm font-semibold text-white">Fixed Credentials Automatically Loaded</h4>
+                      <h4 className="text-sm font-semibold text-white">Select Your CPU Profile</h4>
                       <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                        Username <code className="text-purple-300 font-mono">PortableExe</code> and encrypted password are automatically prepared. No account entry needed.
+                        Adaptive mode automatically calibrates threads and transposition hash to your host machine's hardware.
                       </p>
                     </div>
                   </div>
@@ -373,23 +358,6 @@ export default function App() {
                 All 14 variables supported by the official upstream worker are configurable via GUI inputs, number spinners, and switches.
               </p>
 
-              {/* Fixed Credentials Display */}
-              <div className="mb-6 p-4 rounded-xl bg-purple-950/20 border border-purple-800/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/20 shrink-0">
-                    <Lock className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-semibold text-white">Fixed Contributor Account</h4>
-                    <p className="text-xs text-slate-400">
-                      Username: <span className="text-purple-300 font-mono font-bold">PortableExe</span> • Password: <span className="text-purple-300 font-mono font-bold">ExePassword</span> (Encrypted)
-                    </p>
-                  </div>
-                </div>
-                <div className="text-xs font-mono bg-purple-900/40 text-purple-300 px-3 py-1.5 rounded-lg border border-purple-700/40">
-                  Cipher: {fixedPasswordEncrypted}
-                </div>
-              </div>
 
               {/* Live Parameter Controls */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
