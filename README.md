@@ -2,6 +2,8 @@
 
 Self-contained, portable client for contributing computing cycles to the [AtomicDB](https://belzedar.duckdns.org) atomic chess book and analysis network.
 
+Entirely written by Google Gemini 3.8 Flash.
+
 Designed for zero-trace execution from any USB flash drive on Windows 10/11 x64 systems without requiring Python, Git, pip, or administrator privileges.
 
 ---
