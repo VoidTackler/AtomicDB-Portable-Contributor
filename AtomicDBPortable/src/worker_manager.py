@@ -18,9 +18,10 @@ logger = logging.getLogger("AtomicDB.WorkerManager")
 class WorkerManager:
     """Supervises the official atomicdb_worker.py script without modifying upstream code."""
 
-    def __init__(self, python_executable: str, worker_script_path: str):
+    def __init__(self, python_executable: str, worker_script_path: str, analytics_logger=None):
         self.python_executable = python_executable
         self.worker_script_path = worker_script_path
+        self.analytics_logger = analytics_logger
         self.process: Optional[subprocess.Popen] = None
         self.is_running = False
         self.current_pid: Optional[int] = None
@@ -29,6 +30,9 @@ class WorkerManager:
         self._reader_thread: Optional[threading.Thread] = None
         self.consecutive_crashes = 0
         self.last_crash_time = 0.0
+
+    def set_analytics_logger(self, analytics_logger):
+        self.analytics_logger = analytics_logger
 
     def add_log_callback(self, callback: Callable[[str], None]):
         self.log_callbacks.append(callback)
@@ -95,6 +99,8 @@ class WorkerManager:
             args.extend(["--syzygy", str(syzygy).strip()])
         if no_fetch_syzygy:
             args.append("--no-fetch-syzygy")
+        else:
+            args.append("--fetch-syzygy")
         if solve:
             args.append("--solve")
         if no_auto_update:
@@ -248,6 +254,11 @@ class WorkerManager:
         self._reader_thread.start()
 
     def _broadcast_log(self, text: str):
+        if self.analytics_logger:
+            try:
+                self.analytics_logger.parse_worker_line(text)
+            except Exception as e:
+                logger.debug(f"Analytics parse error: {e}")
         for cb in self.log_callbacks:
             try:
                 cb(text)

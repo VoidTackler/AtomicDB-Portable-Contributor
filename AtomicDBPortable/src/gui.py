@@ -18,7 +18,8 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QGridLayout, QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
         QCheckBox, QProgressBar, QTextEdit, QGroupBox, QLineEdit, QTabWidget,
-        QScrollArea, QSystemTrayIcon, QMenu, QMessageBox
+        QScrollArea, QSystemTrayIcon, QMenu, QMessageBox, QTableWidget,
+        QTableWidgetItem, QHeaderView, QSplitter, QFrame, QSizePolicy
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject
     from PySide6.QtGui import QIcon, QFont, QColor
@@ -32,24 +33,27 @@ try:
     from .worker_manager import WorkerManager
     from .engine_manager import EngineManager
     from .security import SecurityManager
+    from .analytics_logger import AnalyticsLogger
 except (ImportError, ValueError):
     from configuration import PortableConfig
     from resource_manager import ResourceManager
     from worker_manager import WorkerManager
     from engine_manager import EngineManager
     from security import SecurityManager
+    from analytics_logger import AnalyticsLogger
 
 class WorkerSignals(QObject):
     log_received = Signal(str)
     stats_updated = Signal(dict)
     status_changed = Signal(str)
+    analytics_updated = Signal(dict)
 
 class MainWindow(QMainWindow if HAS_QT else object):
     """Main PySide6 Window for AtomicDB Portable Client."""
 
     def __init__(self, config: PortableConfig, resource_mgr: ResourceManager,
                  worker_mgr: WorkerManager, engine_mgr: EngineManager,
-                 security: SecurityManager):
+                 security: SecurityManager, analytics_logger=None):
         if not HAS_QT:
             raise RuntimeError("PySide6 is required to launch graphical interface.")
         super().__init__()
@@ -59,12 +63,19 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.worker_mgr = worker_mgr
         self.engine_mgr = engine_mgr
         self.security = security
+        self.analytics_logger = analytics_logger or getattr(worker_mgr, 'analytics_logger', None)
+        if not self.analytics_logger:
+            self.analytics_logger = AnalyticsLogger(self.config.base_dir)
+            self.worker_mgr.set_analytics_logger(self.analytics_logger)
 
         self.signals = WorkerSignals()
         self.worker_mgr.add_log_callback(self.signals.log_received.emit)
+        self.analytics_logger.add_listener(lambda summary: self.signals.analytics_updated.emit(summary))
+        self.signals.analytics_updated.connect(self._update_analytics_ui)
 
         self.setWindowTitle("AtomicDB Portable — Windows x64 Computing Client")
-        self.setMinimumSize(940, 780)
+        self.setMinimumSize(700, 480)
+        self.resize(1020, 820)
 
         self._apply_dark_style()
         self._init_ui()
@@ -169,14 +180,71 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 border: none;
                 background-color: transparent;
             }
+            QSplitter::handle:vertical {
+                background-color: #334155;
+                height: 8px;
+                border-radius: 4px;
+                margin: 2px 24px;
+            }
+            QSplitter::handle:vertical:hover {
+                background-color: #38bdf8;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #0b1120;
+                width: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #334155;
+                min-height: 24px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #38bdf8;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: #0b1120;
+                height: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #334155;
+                min-width: 24px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #38bdf8;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0px;
+                height: 0px;
+            }
         """)
 
     def _init_ui(self):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(6)
+
+        self.main_splitter = QSplitter(Qt.Vertical)
+
+        # Upper pane: Scrollable controls container
+        scroll_controls = QScrollArea()
+        scroll_controls.setWidgetResizable(True)
+        scroll_controls.setFrameShape(QFrame.NoFrame)
+        scroll_controls.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_controls.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        controls_container = QWidget()
+        controls_layout = QVBoxLayout(controls_container)
+        controls_layout.setContentsMargins(4, 4, 4, 4)
+        controls_layout.setSpacing(10)
 
         # Header bar
         header = QHBoxLayout()
@@ -184,11 +252,11 @@ class MainWindow(QMainWindow if HAS_QT else object):
         title_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #f8fafc; letter-spacing: 0.5px;")
         header.addWidget(title_label)
 
-        self.lbl_server_status = QLabel("Mode: Standalone Client (Zero Remote Server Required)")
-        self.lbl_server_status.setStyleSheet("color: #38bdf8; font-family: monospace;")
+        self.lbl_server_status = QLabel("Server: Fixed & Built-in (https://belzedar.duckdns.org)")
+        self.lbl_server_status.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px;")
         header.addStretch()
         header.addWidget(self.lbl_server_status)
-        main_layout.addLayout(header)
+        controls_layout.addLayout(header)
 
         # Telemetry & Resource Monitor Box
         res_box = QGroupBox("HOST HARDWARE & REAL-TIME TELEMETRY")
@@ -219,7 +287,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         ram_row.addWidget(self.lbl_cores)
         res_layout.addLayout(ram_row)
 
-        main_layout.addWidget(res_box)
+        controls_layout.addWidget(res_box)
 
         # =========================================================================
         # COMPLETE OPENBENCH CONTRIBUTOR API VARIABLES (INPUTS, NUMBERS, CHECKBOXES)
@@ -227,32 +295,24 @@ class MainWindow(QMainWindow if HAS_QT else object):
         cfg_box = QGroupBox("OPENBENCH CONTRIBUTOR API PARAMETERS (UPSTREAM VARIABLES)")
         cfg_layout = QVBoxLayout(cfg_box)
 
-        # 1. Server URL & Engine paths (Credentials hidden from UI)
+        # 1. Custom Engine & Syzygy paths (Credentials and Server URL are unadjustable & hidden)
         grid_top = QGridLayout()
 
-        # -S / --server
-        grid_top.addWidget(QLabel("Server URL (-S):"), 0, 0)
-        self.txt_server = QLineEdit()
-        self.txt_server.setPlaceholderText("https://belzedar.duckdns.org")
-        self.txt_server.setText(self.config.get("openbench", "server", default="https://belzedar.duckdns.org"))
-        self.txt_server.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_server, 0, 1)
-
         # --engine
-        grid_top.addWidget(QLabel("Custom Engine (--engine):"), 0, 2)
+        grid_top.addWidget(QLabel("Custom Engine (--engine):"), 0, 0)
         self.txt_engine = QLineEdit()
-        self.txt_engine.setPlaceholderText("Optional path to custom engine binary (blank = default)")
+        self.txt_engine.setPlaceholderText("Optional path to custom engine binary (blank = default bundled engine)")
         self.txt_engine.setText(self.config.get("openbench", "engine_path", default=""))
         self.txt_engine.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_engine, 0, 3)
+        grid_top.addWidget(self.txt_engine, 0, 1)
 
         # --syzygy
         grid_top.addWidget(QLabel("Syzygy TBs (--syzygy):"), 1, 0)
         self.txt_syzygy = QLineEdit()
-        self.txt_syzygy.setPlaceholderText("Directories separated by ; (e.g. C:\\syzygy;D:\\tb)")
+        self.txt_syzygy.setPlaceholderText("Directories separated by ; (blank = auto-manage on USB)")
         self.txt_syzygy.setText(self.config.get("openbench", "syzygy_path", default=""))
         self.txt_syzygy.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_syzygy, 1, 1, 1, 3)
+        grid_top.addWidget(self.txt_syzygy, 1, 1)
 
         cfg_layout.addLayout(grid_top)
 
@@ -307,14 +367,14 @@ class MainWindow(QMainWindow if HAS_QT else object):
         # 3. Checkboxes (All OpenBench Boolean API flags)
         chk_layout = QHBoxLayout()
 
-        self.chk_no_fetch_syzygy = QCheckBox("No Tablebase (--no-fetch-syzygy, Zero C: Trace)")
-        self.chk_no_fetch_syzygy.setToolTip("Always enabled by default to prevent downloading 1.3 GB tablebases to disk")
+        self.chk_no_fetch_syzygy = QCheckBox("Disable Tablebases (--no-fetch-syzygy)")
+        self.chk_no_fetch_syzygy.setToolTip("Checked: skip Syzygy tablebases (saves disk space/bandwidth)\nUnchecked: download and cache Syzygy 3-4-5 tablebases directly onto this USB drive (zero host C: trace)")
         self.chk_no_fetch_syzygy.setChecked(self.config.get("openbench", "no_fetch_syzygy", default=True))
         self.chk_no_fetch_syzygy.toggled.connect(self._update_cmd_preview)
         chk_layout.addWidget(self.chk_no_fetch_syzygy)
 
         self.chk_solve = QCheckBox("Solve Tasks (--solve)")
-        self.chk_solve.setToolTip("Serve exhaustive proof solve tasks besides normal position analysis")
+        self.chk_solve.setToolTip("Serve exhaustive proof solve tasks (gracefully auto-skips without failing tasks if engine lacks custom solve extension)")
         self.chk_solve.setChecked(self.config.get("openbench", "solve", default=False))
         self.chk_solve.toggled.connect(self._update_cmd_preview)
         chk_layout.addWidget(self.chk_solve)
@@ -348,7 +408,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         cmd_preview_row.addStretch()
         cfg_layout.addLayout(cmd_preview_row)
 
-        main_layout.addWidget(cfg_box)
+        controls_layout.addWidget(cfg_box)
 
         # Primary Control Bar with LOCAL STOP PRECEDENCE
         ctrl_layout = QHBoxLayout()
@@ -373,22 +433,174 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.btn_local_stop.toggled.connect(self._on_local_stop_toggled)
         ctrl_layout.addWidget(self.btn_local_stop)
 
-        main_layout.addLayout(ctrl_layout)
+        controls_layout.addLayout(ctrl_layout)
+        scroll_controls.setWidget(controls_container)
+        self.main_splitter.addWidget(scroll_controls)
 
-        # Live Console Output Box
-        log_box = QGroupBox("OFFICIAL WORKER STDOUT / ANALYSIS LOG")
-        log_layout = QVBoxLayout(log_box)
+        # Multi-tab view: 1. Live Analysis Console, 2. Local USB Analytics & History
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #1e293b;
+                background-color: #0b1120;
+                border-radius: 6px;
+            }
+            QTabBar::tab {
+                background: #0f172a;
+                color: #94a3b8;
+                padding: 8px 18px;
+                border: 1px solid #1e293b;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QTabBar::tab:selected {
+                background: #1e293b;
+                color: #38bdf8;
+                border-color: #38bdf8;
+            }
+        """)
+
+        # Tab 1: Live Analysis Console
+        tab_console = QWidget()
+        tab_console_layout = QVBoxLayout(tab_console)
+        tab_console_layout.setContentsMargins(8, 8, 8, 8)
+
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        log_layout.addWidget(self.console)
-        main_layout.addWidget(log_box)
+        self.console.setMinimumHeight(240)
+        self.console.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        tab_console_layout.addWidget(self.console)
+
+        console_bar = QHBoxLayout()
+        btn_clear_console = QPushButton("Clear Console Screen")
+        btn_clear_console.setStyleSheet("background-color: #1e293b; color: #94a3b8; font-size: 11px; padding: 4px 10px;")
+        btn_clear_console.clicked.connect(self.console.clear)
+        console_bar.addWidget(btn_clear_console)
+
+        self.chk_autoscroll = QCheckBox("Auto-scroll")
+        self.chk_autoscroll.setChecked(True)
+        self.chk_autoscroll.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        console_bar.addWidget(self.chk_autoscroll)
+
+        console_bar.addStretch()
+        lbl_console_hint = QLabel("Real-time worker stdout stream directly from USB runtime")
+        lbl_console_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        console_bar.addWidget(lbl_console_hint)
+        tab_console_layout.addLayout(console_bar)
+
+        self.tab_widget.addTab(tab_console, "Live Analysis Console")
+
+        # Tab 2: Local USB Analytics & History
+        tab_analytics = QWidget()
+        tab_analytics_layout = QVBoxLayout(tab_analytics)
+        tab_analytics_layout.setContentsMargins(8, 8, 8, 8)
+
+        # KPI Summary Grid Cards
+        kpi_group = QGroupBox("LOCAL USB METRICS & HISTORICAL RUNTIME COUNTERS")
+        kpi_layout = QGridLayout(kpi_group)
+
+        self.lbl_tasks_completed = QLabel("0")
+        self.lbl_tasks_completed.setStyleSheet("font-size: 20px; font-weight: bold; color: #38bdf8;")
+        self.lbl_total_nodes = QLabel("0")
+        self.lbl_total_nodes.setStyleSheet("font-size: 20px; font-weight: bold; color: #4ade80;")
+        self.lbl_avg_nodes = QLabel("0")
+        self.lbl_avg_nodes.setStyleSheet("font-size: 20px; font-weight: bold; color: #fbbf24;")
+        self.lbl_avg_nps = QLabel("0")
+        self.lbl_avg_nps.setStyleSheet("font-size: 20px; font-weight: bold; color: #a78bfa;")
+        self.lbl_tb_hits = QLabel("0")
+        self.lbl_tb_hits.setStyleSheet("font-size: 20px; font-weight: bold; color: #f472b6;")
+        self.lbl_crashes = QLabel("0")
+        self.lbl_crashes.setStyleSheet("font-size: 20px; font-weight: bold; color: #ef4444;")
+
+        def make_card(title: str, widget: QLabel):
+            box = QWidget()
+            layout = QVBoxLayout(box)
+            layout.setContentsMargins(4, 4, 4, 4)
+            lbl_title = QLabel(title)
+            lbl_title.setStyleSheet("color: #94a3b8; font-size: 11px; text-transform: uppercase;")
+            layout.addWidget(lbl_title)
+            layout.addWidget(widget)
+            return box
+
+        kpi_layout.addWidget(make_card("Tasks Completed", self.lbl_tasks_completed), 0, 0)
+        kpi_layout.addWidget(make_card("Total Nodes", self.lbl_total_nodes), 0, 1)
+        kpi_layout.addWidget(make_card("Avg Nodes / Task", self.lbl_avg_nodes), 0, 2)
+        kpi_layout.addWidget(make_card("Avg NPS (Speed)", self.lbl_avg_nps), 0, 3)
+        kpi_layout.addWidget(make_card("Tablebase Hits", self.lbl_tb_hits), 0, 4)
+        kpi_layout.addWidget(make_card("Engine Failures / Crashes", self.lbl_crashes), 0, 5)
+
+        tab_analytics_layout.addWidget(kpi_group)
+
+        # Recent Tasks Table
+        table_group = QGroupBox("PERSISTENT TASK EXECUTION HISTORY (Saved to USB /logs/history.json)")
+        table_layout = QVBoxLayout(table_group)
+
+        self.table_tasks = QTableWidget()
+        self.table_tasks.setColumnCount(7)
+        self.table_tasks.setHorizontalHeaderLabels(["Timestamp", "Task ID", "Type", "Nodes", "NPS", "TB WDL/DTZ", "Result / Score"])
+        self.table_tasks.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_tasks.setAlternatingRowColors(True)
+        self.table_tasks.setMinimumHeight(280)
+        self.table_tasks.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table_tasks.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table_tasks.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table_tasks.setStyleSheet("""
+            QTableWidget {
+                background-color: #0b1120;
+                alternate-background-color: #0f172a;
+                gridline-color: #1e293b;
+                color: #e2e8f0;
+                font-size: 12px;
+                border: 1px solid #1e293b;
+                border-radius: 4px;
+            }
+            QHeaderView::section {
+                background-color: #1e293b;
+                color: #38bdf8;
+                font-weight: 600;
+                padding: 6px;
+                border: none;
+            }
+        """)
+        table_layout.addWidget(self.table_tasks)
+
+        # Local USB Storage path indicator
+        storage_bar = QHBoxLayout()
+        logs_path = os.path.join(self.config.base_dir, "logs")
+        self.lbl_storage_info = QLabel(f"USB Storage: {logs_path} (history.json, analytics.json, crashes.log, activity.log)")
+        self.lbl_storage_info.setStyleSheet("color: #64748b; font-size: 11px;")
+        storage_bar.addWidget(self.lbl_storage_info)
+        storage_bar.addStretch()
+
+        btn_refresh_analytics = QPushButton("Refresh from Disk")
+        btn_refresh_analytics.setStyleSheet("background-color: #1e293b; color: #38bdf8; font-size: 11px; padding: 4px 10px;")
+        btn_refresh_analytics.clicked.connect(self._refresh_analytics_from_disk)
+        storage_bar.addWidget(btn_refresh_analytics)
+
+        table_layout.addLayout(storage_bar)
+        table_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        tab_analytics_layout.addWidget(table_group)
+
+        self.tab_widget.addTab(tab_analytics, "USB Analytics & Task History")
+        self.main_splitter.addWidget(self.tab_widget)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([330, 470])
+        main_layout.addWidget(self.main_splitter)
+
+        # Initial load of analytics data into UI if logger present
+        if self.analytics_logger:
+            self._update_analytics_ui(self.analytics_logger.get_summary())
 
         # Signals
         self.signals.log_received.connect(self._append_log)
 
     def _update_cmd_preview(self):
-        """Generates real-time preview of the exact invocation command (credentials hidden)."""
-        srv = self.txt_server.text().strip() or "https://belzedar.duckdns.org"
+        """Generates real-time preview of the exact invocation command (credentials & server URL hidden)."""
         t = self.spin_threads.value()
         h = self.spin_hash.value()
         j = self.spin_jobs.value()
@@ -398,7 +610,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         parts = [
             "python atomicdb_worker.py",
-            f"-S {srv}",
             f"-T {t}",
             f"--hash {h}"
         ]
@@ -410,6 +621,8 @@ class MainWindow(QMainWindow if HAS_QT else object):
             parts.append(f'--syzygy "{syz}"')
         if self.chk_no_fetch_syzygy.isChecked():
             parts.append("--no-fetch-syzygy")
+        else:
+            parts.append("--fetch-syzygy")
         if self.chk_solve.isChecked():
             parts.append("--solve")
         if self.chk_no_auto_update.isChecked():
@@ -481,8 +694,8 @@ class MainWindow(QMainWindow if HAS_QT else object):
         user = "PortableExe"
         stored_enc = self.config.get("openbench", "password_encrypted", default="")
         pwd = self.security.caesar_decrypt(stored_enc) if stored_enc else "ExePassword"
-        pwd = pwd or "ExePassword"
-        server_url = self.txt_server.text().strip() or "https://belzedar.duckdns.org"
+        # Server URL is fixed, unadjustable and hidden from user interface
+        server_url = "https://belzedar.duckdns.org"
 
         threads = self.spin_threads.value()
         hash_mb = self.spin_hash.value()
@@ -539,3 +752,79 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
     def _append_log(self, text: str):
         self.console.append(text)
+        if getattr(self, "chk_autoscroll", None) and self.chk_autoscroll.isChecked():
+            cursor = self.console.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.console.setTextCursor(cursor)
+
+    def _refresh_analytics_from_disk(self):
+        """Reloads analytics and history directly from USB disk."""
+        if self.analytics_logger:
+            self.analytics_logger.load_persisted_data()
+            self._update_analytics_ui(self.analytics_logger.get_summary())
+
+    def _update_analytics_ui(self, summary: dict):
+        """Updates KPI counters and tasks table on USB analytics signal."""
+        try:
+            total_tasks = summary.get("total_tasks_completed", 0)
+            total_nodes = summary.get("total_nodes_analyzed", 0)
+            avg_nodes = summary.get("average_nodes_per_task", 0)
+            avg_nps = summary.get("average_nps", 0)
+            tb_hits = summary.get("tablebase_hits", 0)
+            crashes = summary.get("crashes", 0)
+
+            self.lbl_tasks_completed.setText(f"{total_tasks:,}")
+            if total_nodes >= 1_000_000_000:
+                self.lbl_total_nodes.setText(f"{total_nodes / 1_000_000_000:.2f} B")
+            elif total_nodes >= 1_000_000:
+                self.lbl_total_nodes.setText(f"{total_nodes / 1_000_000:.2f} M")
+            else:
+                self.lbl_total_nodes.setText(f"{total_nodes:,}")
+
+            if avg_nodes >= 1_000_000:
+                self.lbl_avg_nodes.setText(f"{avg_nodes / 1_000_000:.2f} M")
+            else:
+                self.lbl_avg_nodes.setText(f"{avg_nodes:,}")
+
+            if avg_nps >= 1_000_000:
+                self.lbl_avg_nps.setText(f"{avg_nps / 1_000_000:.2f} M/s")
+            elif avg_nps >= 1_000:
+                self.lbl_avg_nps.setText(f"{avg_nps / 1_000:.1f} k/s")
+            else:
+                self.lbl_avg_nps.setText(f"{avg_nps:,}/s")
+
+            self.lbl_tb_hits.setText(f"{tb_hits:,}")
+            self.lbl_crashes.setText(f"{crashes:,}")
+
+            recent = summary.get("recent_tasks", [])
+            self.table_tasks.setRowCount(len(recent))
+            for row_idx, task in enumerate(recent):
+                ts = task.get("timestamp", "")
+                if "T" in ts:
+                    ts = ts.split("T")[1][:8]
+                task_id = str(task.get("task_id", ""))
+                task_type = str(task.get("type", "engine")).upper()
+                nodes = f"{task.get('nodes', 0):,}"
+                nps = f"{task.get('nps', 0):,}"
+                tb_info = "-"
+                if task.get("is_tb"):
+                    tb_info = f"wdl={task.get('wdl')}"
+                    if task.get("dtz") is not None:
+                        tb_info += f" dtz={task.get('dtz')}"
+                result = str(task.get("summary", ""))
+
+                items = [
+                    QTableWidgetItem(ts),
+                    QTableWidgetItem(task_id),
+                    QTableWidgetItem(task_type),
+                    QTableWidgetItem(nodes),
+                    QTableWidgetItem(nps),
+                    QTableWidgetItem(tb_info),
+                    QTableWidgetItem(result)
+                ]
+                for col_idx, item in enumerate(items):
+                    item.setTextAlignment(Qt.AlignCenter if col_idx < 6 else Qt.AlignLeft | Qt.AlignVCenter)
+                    self.table_tasks.setItem(row_idx, col_idx, item)
+        except Exception as e:
+            logger.debug(f"Error updating analytics UI: {e}")
+

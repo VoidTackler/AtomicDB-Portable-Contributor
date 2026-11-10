@@ -16,6 +16,7 @@ try:
     from .resource_manager import ResourceManager
     from .engine_manager import EngineManager
     from .worker_manager import WorkerManager
+    from .analytics_logger import AnalyticsLogger
 except (ImportError, ValueError):
     # Running directly as top-level script or compiled by PyInstaller
     from configuration import PortableConfig, get_base_dir
@@ -24,6 +25,7 @@ except (ImportError, ValueError):
     from resource_manager import ResourceManager
     from engine_manager import EngineManager
     from worker_manager import WorkerManager
+    from analytics_logger import AnalyticsLogger
 
 def main():
     # 0. Check if invoked as internal worker subprocess by compiled .exe
@@ -48,10 +50,6 @@ def main():
 
         # Forward arguments to atomicdb_worker
         forward_args = list(sys.argv[2:])
-        # User requirement: ensure no tablebase is always enabled by default
-        if "--no-fetch-syzygy" not in forward_args and not any(a.startswith("--syzygy") for a in forward_args):
-            forward_args.append("--no-fetch-syzygy")
-
         sys.argv = [worker_script] + forward_args
         import runpy
         runpy.run_path(worker_script, run_name="__main__")
@@ -78,9 +76,11 @@ def main():
     engine_dir = config.get_path("engine")
     engine_mgr = EngineManager(engine_dir)
 
+    analytics_logger = AnalyticsLogger(base_dir)
+
     worker_script = config.get_path("worker/atomicdb_worker.py")
     python_bin = sys.executable
-    worker_mgr = WorkerManager(python_bin, worker_script)
+    worker_mgr = WorkerManager(python_bin, worker_script, analytics_logger=analytics_logger)
 
     # Handle verify-only CLI argument
     if args.verify_only:
@@ -98,7 +98,7 @@ def main():
             from PySide6.QtWidgets import QApplication
             from .gui import MainWindow
             app = QApplication(sys.argv)
-            window = MainWindow(config, resource_mgr, worker_mgr, engine_mgr, security)
+            window = MainWindow(config, resource_mgr, worker_mgr, engine_mgr, security, analytics_logger)
             window.show()
             sys.exit(app.exec())
         except (ImportError, RuntimeError) as e:

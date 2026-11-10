@@ -17,7 +17,7 @@ import {
 
 export default function App() {
   const [copiedCmd, setCopiedCmd] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'layout' | 'builder' | 'params' | 'dependencies'>('layout');
+  const [selectedTab, setSelectedTab] = useState<'layout' | 'builder' | 'params' | 'analytics' | 'dependencies'>('layout');
   const [downloading, setDownloading] = useState(false);
 
   // Contributor API Parameters for live preview
@@ -36,17 +36,16 @@ export default function App() {
 
   const serverUrl = 'https://belzedar.duckdns.org';
 
-  // Compute live command string (credentials hidden from UI)
+  // Compute live command string (credentials & server URL hidden from UI)
   const commandPreview = [
     'AtomicDB.exe',
     '--exec-worker',
-    `-S ${serverUrl}`,
     `-T ${threads}`,
     `--hash ${hashMb}`,
     jobs > 1 ? `--jobs ${jobs}` : '',
     customEngine ? `--engine "${customEngine}"` : '',
     customSyzygy ? `--syzygy "${customSyzygy}"` : '',
-    noFetchSyzygy ? '--no-fetch-syzygy' : '',
+    noFetchSyzygy ? '--no-fetch-syzygy' : '--fetch-syzygy',
     solve ? '--solve' : '',
     noAutoUpdate ? '--no-auto-update' : '',
     noEngineUpdate ? '--no-engine-update' : '',
@@ -83,7 +82,7 @@ export default function App() {
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Self-Contained Windows x64 Client for OpenBench / Atomic Chess Distributed Analysis
+                Self-Contained Windows x64 Client with Local USB Analytics & History
               </p>
             </div>
           </div>
@@ -113,7 +112,7 @@ export default function App() {
             <div>
               <h3 className="text-sm font-semibold text-white">Reimagined Easy-to-Find Layout</h3>
               <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                Compiled binary placed directly in root as <code className="text-cyan-300 font-mono">AtomicDB.exe</code> and in <code className="text-cyan-300 font-mono">READY_TO_RUN_EXE/</code>.
+                Single compiled binary placed in root as <code className="text-cyan-300 font-mono">AtomicDB.exe</code> and in <code className="text-cyan-300 font-mono">READY_TO_RUN_EXE/</code>.
               </p>
             </div>
           </div>
@@ -135,9 +134,9 @@ export default function App() {
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-white">Zero Host Footprint (No C: Trace)</h3>
+              <h3 className="text-sm font-semibold text-white">Local USB Analytics & Zero C: Trace</h3>
               <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                <code className="text-emerald-300 font-mono">--no-fetch-syzygy</code> always enabled. Engines, logs, and temp write strictly to USB device.
+                All logs, task history, tablebases, and temp files save directly to USB (<code className="text-emerald-300 font-mono">logs/</code>, <code className="text-emerald-300 font-mono">syzygy-345/</code>).
               </p>
             </div>
           </div>
@@ -179,6 +178,18 @@ export default function App() {
           >
             <Cpu className="w-4 h-4" />
             <span>OpenBench Contributor Variables</span>
+          </button>
+
+          <button
+            onClick={() => setSelectedTab('analytics')}
+            className={`pb-3 px-4 text-sm font-medium border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
+              selectedTab === 'analytics'
+                ? 'border-cyan-500 text-cyan-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            <span>USB Analytics & Logs</span>
           </button>
 
           <button
@@ -355,7 +366,7 @@ export default function App() {
                 <span>OpenBench Contributor API Variables</span>
               </h2>
               <p className="text-sm text-slate-400 mb-6">
-                All 14 variables supported by the official upstream worker are configurable via GUI inputs, number spinners, and switches.
+                All runtime parameters are configurable via GUI inputs, number spinners, and switches. Contributor credentials and server URL are unadjustable and hidden for zero-configuration contributor deployment.
               </p>
 
 
@@ -417,24 +428,30 @@ export default function App() {
 
               {/* Boolean Toggles */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-6">
-                <label className="flex items-center gap-2 p-3 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer hover:bg-slate-900">
+                <label className="flex items-center gap-2 p-3 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer hover:bg-slate-900" title="Checked: skip tablebases to save disk space. Unchecked: downloads Syzygy 3-4-5 tablebases directly onto USB">
                   <input
                     type="checkbox"
                     checked={noFetchSyzygy}
                     onChange={(e) => setNoFetchSyzygy(e.target.checked)}
                     className="rounded border-slate-700 text-cyan-600 focus:ring-cyan-500"
                   />
-                  <span className="text-xs font-medium text-slate-300">No Tablebase (--no-fetch-syzygy)</span>
+                  <div>
+                    <span className="text-xs font-medium text-slate-300 block">Disable Tablebases (--no-fetch-syzygy)</span>
+                    <span className="text-[10px] text-slate-500">{noFetchSyzygy ? 'Skips 1.3 GB tablebase download' : 'Downloads tablebases directly to USB'}</span>
+                  </div>
                 </label>
 
-                <label className="flex items-center gap-2 p-3 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer hover:bg-slate-900">
+                <label className="flex items-center gap-2 p-3 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer hover:bg-slate-900" title="Solve proof tasks. Gracefully auto-skips without failing tasks if engine lacks custom solve extension">
                   <input
                     type="checkbox"
                     checked={solve}
                     onChange={(e) => setSolve(e.target.checked)}
                     className="rounded border-slate-700 text-cyan-600 focus:ring-cyan-500"
                   />
-                  <span className="text-xs font-medium text-slate-300">Solve Proofs (--solve)</span>
+                  <div>
+                    <span className="text-xs font-medium text-slate-300 block">Solve Tasks (--solve)</span>
+                    <span className="text-[10px] text-slate-500">Auto-skips safely if no solver binary</span>
+                  </div>
                 </label>
 
                 <label className="flex items-center gap-2 p-3 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer hover:bg-slate-900">
@@ -488,7 +505,65 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 4: Offline Engine Pre-Downloader */}
+        {/* Tab 4: Local USB Analytics & Logs */}
+        {selectedTab === 'analytics' && (
+          <div className="space-y-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+              <h2 className="text-lg font-semibold text-white flex items-center gap-2 mb-2">
+                <FileText className="w-5 h-5 text-cyan-400" />
+                <span>Local USB Analytics & Historical Logging</span>
+              </h2>
+              <p className="text-sm text-slate-400 mb-6">
+                All task records, engine analytics, speed calculations, and crash diagnostics are saved directly to the USB drive with zero host trace.
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
+                  <div className="flex items-center gap-2 text-cyan-400 text-xs font-mono font-semibold mb-2">
+                    <FileCode className="w-4 h-4" />
+                    <span>logs/history.json</span>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Persistent JSON array storing every completed task: ID, timestamp, task type (Engine / Tablebase / Solve), node count, elapsed seconds, NPS, and result score.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
+                  <div className="flex items-center gap-2 text-emerald-400 text-xs font-mono font-semibold mb-2">
+                    <FileCode className="w-4 h-4" />
+                    <span>logs/analytics.json</span>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Cumulative statistical aggregate containing total tasks completed, total nodes analyzed, average nodes per task, average NPS (speed), and tablebase hit count.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
+                  <div className="flex items-center gap-2 text-rose-400 text-xs font-mono font-semibold mb-2">
+                    <AlertCircle className="w-4 h-4" />
+                    <span>logs/crashes.log</span>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Dedicated crash and engine failure log recording timestamped exceptions, dead pipe events, and graceful auto-restart recoveries directly on USB.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
+                <h4 className="text-sm font-semibold text-white mb-2">Native UI Dual-Tab Console</h4>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Inside the compiled <code className="text-cyan-300 font-mono">AtomicDB.exe</code> application, the bottom section includes a tabbed interface:
+                </p>
+                <ul className="text-xs text-slate-300 mt-2 space-y-1 list-disc list-inside">
+                  <li><strong className="text-white">Live Analysis Console:</strong> Raw real-time stdout stream with auto-scroll and clear screen buttons.</li>
+                  <li><strong className="text-white">USB Analytics & Task History:</strong> Real-time KPI summary cards (Total Nodes, Avg NPS, TB Hits, Crashes) and an interactive 7-column execution history table.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Tab 5: Offline Engine Pre-Downloader */}
         {selectedTab === 'dependencies' && (
           <div className="space-y-6">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">

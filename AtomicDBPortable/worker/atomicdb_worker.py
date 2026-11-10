@@ -1447,7 +1447,10 @@ def resolve_syzygy(args, server, log=print, script_path=None, get=None):
     if args.syzygy:
         return args.syzygy
     if getattr(args, 'no_fetch_syzygy', False):
-        log('syzygy: download disabled (--no-fetch-syzygy)', flush=True)
+        try:
+            log('syzygy: download disabled (--no-fetch-syzygy)', flush=True)
+        except TypeError:
+            log('syzygy: download disabled (--no-fetch-syzygy)')
         return ''
     fetched = fetch_syzygy_set(server, syzygy_dir(script_path), log=log,
                                get=get)
@@ -2046,6 +2049,43 @@ class SolverEngineFailure(Exception):
     """
 
 
+def probe_solver_support(engine_path: str, timeout: float = 3.0) -> bool:
+    """Probes if the engine binary recognizes the custom 'solve' command."""
+    if not engine_path or not os.path.exists(engine_path):
+        return False
+    try:
+        creationflags = 0
+        if sys.platform == 'win32':
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+        p = subprocess.Popen(
+            [engine_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=creationflags
+        )
+        try:
+            out, err = p.communicate("solve\nquit\n", timeout=timeout)
+            combined = ((out or "") + "\n" + (err or "")).lower()
+            if "unknown command: 'solve'" in combined or "unknown command: solve" in combined:
+                return False
+            if "unknown command" in combined:
+                return False
+            return True
+        except Exception:
+            try:
+                p.kill()
+                p.wait()
+            except Exception:
+                pass
+            return False
+    except Exception:
+        return False
+
+
 class Solver:
     """Drives the engine's `solve` command over a fresh process each time.
 
@@ -2355,10 +2395,13 @@ def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
         args=(server, auth, current_task, stop_event),
         name='atomicdb-solve-heartbeat', daemon=True).start()
 
-    # Nonce de una peticion LOGICA de arriendo, con la misma regla que el
-    # hilo de analisis: se conserva mientras el resultado sea ambiguo (la
-    # asignacion pudo commitear y perderse la respuesta) y se renueva solo
-    # cuando el servidor ya ha contestado algo que cierra la peticion.
+    # Probe if the current engine binary actually supports the custom 'solve' command
+    # before requesting any solve tasks from the server.
+    if not probe_solver_support(solver.path):
+        print(f"solve DISABLED: engine '{solver.path}' does not support the 'solve' command (Unknown command). "
+              "Standard analysis remains fully active without failing solve tasks.", flush=True)
+        return
+
     lease_session = secrets.token_urlsafe(24)
     engine_failures = 0
     generation = 0
@@ -2382,14 +2425,13 @@ def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
                 proven = (solver.path, solver.build_sha)
         except SolveAcquireAmbiguous:
             pass                       # misma sesion en el reintento
-        except SolverEngineFailure:
-            # Ya se ha impreso arriba con el detalle que dio el motor.  Se
-            # reintenta un par de veces por si el fallo era transitorio y
-            # luego se APAGA el modo SOLVE: un binario que no sabe resolver
-            # no cambia de opinion, y seguir pidiendo tareas para soltarlas
-            # solo pasea la cola por arriendos de veinte minutos.  El analisis
-            # sigue intacto; este hilo es el unico que se retira.
+        except SolverEngineFailure as sef:
             lease_session = secrets.token_urlsafe(24)
+            err_str = str(sef).lower()
+            if "has no solver" in err_str or "unknown command" in err_str:
+                print(f"solve DISABLED: {solver.path} has no proof solver compiled in. "
+                      "Retiring solver thread; standard analysis continues normally.", flush=True)
+                return
             engine_failures += 1
             if engine_failures >= SOLVER_ENGINE_FAILURE_LIMIT:
                 if engines is None:
@@ -2737,10 +2779,10 @@ def main():
     ap.add_argument('--syzygy', default='',
                     help='atomic TB dirs separated by ; (when given, it is '
                          'used as-is and nothing is downloaded)')
-    ap.add_argument('--no-fetch-syzygy', dest='no_fetch_syzygy', action='store_true', default=True,
-                    help=f'do not download the {SYZYGY_SET} set (1.3 GB) [default: True]')
+    ap.add_argument('--no-fetch-syzygy', dest='no_fetch_syzygy', action='store_true', default=False,
+                    help=f'do not download the {SYZYGY_SET} set (1.3 GB)')
     ap.add_argument('--fetch-syzygy', dest='no_fetch_syzygy', action='store_false',
-                    help=f'explicitly download the {SYZYGY_SET} set (1.3 GB) to USB disk')
+                    help=f'download the {SYZYGY_SET} set (1.3 GB) directly to USB storage')
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--no-auto-update', action='store_true',
                     help='do not update this file from the official server')
