@@ -1,14 +1,15 @@
 """
 AtomicDB Portable - PySide6 Native Windows GUI Application
 Provides real-time telemetry meters, allocation controls, and strict local stop precedence.
-Includes complete inputs, number spinners, and checkboxes for every variable in the open-source contributor API.
+Includes complete inputs, number spinners, checkboxes, session metrics, current task monitor with ETA,
+permanent lifetime statistics, and interactive real-time time-series graphs.
 """
 
 import sys
 import os
 import time
 import logging
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger("AtomicDB.GUI")
 
@@ -19,10 +20,10 @@ try:
         QGridLayout, QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
         QCheckBox, QProgressBar, QTextEdit, QGroupBox, QLineEdit, QTabWidget,
         QScrollArea, QSystemTrayIcon, QMenu, QMessageBox, QTableWidget,
-        QTableWidgetItem, QHeaderView, QSplitter, QFrame, QSizePolicy
+        QTableWidgetItem, QHeaderView, QSplitter, QFrame, QSizePolicy, QSlider
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject
-    from PySide6.QtGui import QIcon, QFont, QColor
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPointF, QRectF
+    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QBrush, QPolygonF
     HAS_QT = True
 except ImportError:
     HAS_QT = False
@@ -33,20 +34,298 @@ try:
     from .worker_manager import WorkerManager
     from .engine_manager import EngineManager
     from .security import SecurityManager
-    from .analytics_logger import AnalyticsLogger
+    from .analytics_logger import AnalyticsLogger, format_nodes_compact
 except (ImportError, ValueError):
     from configuration import PortableConfig
     from resource_manager import ResourceManager
     from worker_manager import WorkerManager
     from engine_manager import EngineManager
     from security import SecurityManager
-    from analytics_logger import AnalyticsLogger
+    from analytics_logger import AnalyticsLogger, format_nodes_compact
 
-class WorkerSignals(QObject):
-    log_received = Signal(str)
-    stats_updated = Signal(dict)
-    status_changed = Signal(str)
-    analytics_updated = Signal(dict)
+class WorkerSignals(QObject if HAS_QT else object):
+    if HAS_QT:
+        log_received = Signal(str)
+        stats_updated = Signal(dict)
+        status_changed = Signal(str)
+        analytics_updated = Signal(dict)
+
+# =============================================================================
+# REAL-TIME CANVAS CHART WIDGETS (THIS SESSION)
+# =============================================================================
+
+class CPUChartWidget(QWidget if HAS_QT else object):
+    """Real-time Canvas/Painter chart for System CPU % vs Worker CPU % over time."""
+
+    def __init__(self, parent=None):
+        if not HAS_QT:
+            return
+        super().__init__(parent)
+        self.history: List[Dict[str, Any]] = []
+        self.setMinimumHeight(140)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def update_data(self, history: List[Dict[str, Any]]):
+        self.history = history or []
+        if HAS_QT:
+            self.update()
+
+    def paintEvent(self, event):
+        if not HAS_QT:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+
+        # Dark surface background & border
+        painter.fillRect(0, 0, w, h, QColor("#020617"))
+        painter.setPen(QPen(QColor("#1e293b"), 1))
+        painter.drawRect(0, 0, w - 1, h - 1)
+
+        # Title & legend
+        painter.setFont(QFont("Consolas", 9, QFont.Bold))
+        painter.setPen(QColor("#94a3b8"))
+        painter.drawText(10, 18, "CPU USAGE OVER TIME (%)")
+
+        sys_val = self.history[-1].get("system_cpu", 0) if self.history else 0
+        wrk_val = self.history[-1].get("worker_cpu", 0) if self.history else 0
+        txt = f"Sys: {sys_val:.1f}% | Wrk: {wrk_val:.1f}%"
+        painter.setPen(QColor("#38bdf8"))
+        painter.drawText(max(10, w - 180), 18, txt)
+
+        pad_l, pad_r, pad_t, pad_b = 35, 10, 26, 18
+        pw = max(10, w - pad_l - pad_r)
+        ph = max(10, h - pad_t - pad_b)
+
+        # Horizontal gridlines
+        painter.setPen(QPen(QColor("#1e293b"), 1, Qt.DotLine))
+        for pct in (0.25, 0.5, 0.75):
+            y = pad_t + ph * (1.0 - pct)
+            painter.drawLine(pad_l, int(y), pad_l + pw, int(y))
+
+        # Y Axis labels
+        painter.setFont(QFont("Consolas", 8))
+        painter.setPen(QColor("#64748b"))
+        painter.drawText(4, int(pad_t + 10), "100%")
+        painter.drawText(10, int(pad_t + ph * 0.5 + 4), "50%")
+        painter.drawText(16, int(pad_t + ph), "0%")
+
+        if len(self.history) < 2:
+            painter.setPen(QColor("#475569"))
+            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting CPU telemetry (0.8s)...")
+            return
+
+        n = len(self.history)
+        step = pw / max(1, n - 1)
+
+        # Draw System CPU line (Amber #fbbf24)
+        sys_poly = QPolygonF()
+        for i, pt in enumerate(self.history):
+            val = min(100.0, max(0.0, float(pt.get("system_cpu", 0))))
+            x = pad_l + i * step
+            y = pad_t + ph * (1.0 - val / 100.0)
+            sys_poly.append(QPointF(x, y))
+
+        painter.setPen(QPen(QColor("#fbbf24"), 1.8))
+        painter.drawPolyline(sys_poly)
+
+        # Draw Worker CPU line (Sky Blue #38bdf8)
+        wrk_poly = QPolygonF()
+        for i, pt in enumerate(self.history):
+            val = min(100.0, max(0.0, float(pt.get("worker_cpu", 0))))
+            x = pad_l + i * step
+            y = pad_t + ph * (1.0 - val / 100.0)
+            wrk_poly.append(QPointF(x, y))
+
+        painter.setPen(QPen(QColor("#38bdf8"), 2.0))
+        painter.drawPolyline(wrk_poly)
+
+        # Draw X-axis timestamps
+        painter.setFont(QFont("Consolas", 7))
+        painter.setPen(QColor("#64748b"))
+        t_start = self.history[0].get("timestamp", "")
+        t_end = self.history[-1].get("timestamp", "")
+        t_mid = self.history[len(self.history) // 2].get("timestamp", "")
+        painter.drawText(pad_l, h - 3, t_start)
+        if len(self.history) > 4:
+            painter.drawText(pad_l + pw // 2 - 25, h - 3, t_mid)
+        painter.drawText(max(pad_l + pw // 2 + 10, pad_l + pw - 55), h - 3, t_end)
+
+
+class RAMChartWidget(QWidget if HAS_QT else object):
+    """Real-time Canvas/Painter chart for Worker RAM (RSS) vs Host Available RAM over time."""
+
+    def __init__(self, parent=None):
+        if not HAS_QT:
+            return
+        super().__init__(parent)
+        self.history: List[Dict[str, Any]] = []
+        self.setMinimumHeight(140)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def update_data(self, history: List[Dict[str, Any]]):
+        self.history = history or []
+        if HAS_QT:
+            self.update()
+
+    def paintEvent(self, event):
+        if not HAS_QT:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+
+        painter.fillRect(0, 0, w, h, QColor("#020617"))
+        painter.setPen(QPen(QColor("#1e293b"), 1))
+        painter.drawRect(0, 0, w - 1, h - 1)
+
+        painter.setFont(QFont("Consolas", 9, QFont.Bold))
+        painter.setPen(QColor("#94a3b8"))
+        painter.drawText(10, 18, "RAM USAGE OVER TIME (MB)")
+
+        wrk_ram = self.history[-1].get("worker_ram", 0) if self.history else 0
+        avail_ram = self.history[-1].get("available_ram", 0) if self.history else 0
+        txt = f"RSS: {wrk_ram} MB | Avail: {avail_ram} MB"
+        painter.setPen(QColor("#a78bfa"))
+        painter.drawText(max(10, w - 210), 18, txt)
+
+        pad_l, pad_r, pad_t, pad_b = 40, 10, 26, 18
+        pw = max(10, w - pad_l - pad_r)
+        ph = max(10, h - pad_t - pad_b)
+
+        max_val = max([pt.get("worker_ram", 0) for pt in self.history] + [1024])
+        max_val = max(max_val * 1.3, 2048)
+
+        # Horizontal gridlines
+        painter.setPen(QPen(QColor("#1e293b"), 1, Qt.DotLine))
+        for pct in (0.33, 0.66):
+            y = pad_t + ph * (1.0 - pct)
+            painter.drawLine(pad_l, int(y), pad_l + pw, int(y))
+
+        painter.setFont(QFont("Consolas", 8))
+        painter.setPen(QColor("#64748b"))
+        painter.drawText(4, int(pad_t + 10), f"{int(max_val)}M")
+        painter.drawText(10, int(pad_t + ph), "0M")
+
+        if len(self.history) < 2:
+            painter.setPen(QColor("#475569"))
+            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting RAM telemetry (0.8s)...")
+            return
+
+        n = len(self.history)
+        step = pw / max(1, n - 1)
+
+        wrk_poly = QPolygonF()
+        for i, pt in enumerate(self.history):
+            val = min(max_val, max(0.0, float(pt.get("worker_ram", 0))))
+            x = pad_l + i * step
+            y = pad_t + ph * (1.0 - val / max_val)
+            wrk_poly.append(QPointF(x, y))
+
+        painter.setPen(QPen(QColor("#a78bfa"), 2.0))
+        painter.drawPolyline(wrk_poly)
+
+        # Draw X-axis timestamps
+        painter.setFont(QFont("Consolas", 7))
+        painter.setPen(QColor("#64748b"))
+        t_start = self.history[0].get("timestamp", "")
+        t_end = self.history[-1].get("timestamp", "")
+        t_mid = self.history[len(self.history) // 2].get("timestamp", "")
+        painter.drawText(pad_l, h - 3, t_start)
+        if len(self.history) > 4:
+            painter.drawText(pad_l + pw // 2 - 25, h - 3, t_mid)
+        painter.drawText(max(pad_l + pw // 2 + 10, pad_l + pw - 55), h - 3, t_end)
+
+
+class NPSChartWidget(QWidget if HAS_QT else object):
+    """Real-time Canvas/Painter chart for Nodes Per Second across completed tasks this session."""
+
+    def __init__(self, parent=None):
+        if not HAS_QT:
+            return
+        super().__init__(parent)
+        self.history: List[Dict[str, Any]] = []
+        self.setMinimumHeight(140)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def update_data(self, history: List[Dict[str, Any]]):
+        self.history = history or []
+        if HAS_QT:
+            self.update()
+
+    def paintEvent(self, event):
+        if not HAS_QT:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+
+        painter.fillRect(0, 0, w, h, QColor("#020617"))
+        painter.setPen(QPen(QColor("#1e293b"), 1))
+        painter.drawRect(0, 0, w - 1, h - 1)
+
+        painter.setFont(QFont("Consolas", 9, QFont.Bold))
+        painter.setPen(QColor("#94a3b8"))
+        painter.drawText(10, 18, "NPS PER TASK (THIS SESSION)")
+
+        latest_nps = self.history[-1].get("nps", 0) if self.history else 0
+        if latest_nps >= 1_000_000:
+            txt = f"Latest: {latest_nps / 1_000_000:.2f} M/s"
+        elif latest_nps >= 1_000:
+            txt = f"Latest: {latest_nps / 1_000:.1f} k/s"
+        else:
+            txt = f"Latest: {latest_nps:,}/s"
+        painter.setPen(QColor("#4ade80"))
+        painter.drawText(max(10, w - 180), 18, txt)
+
+        pad_l, pad_r, pad_t, pad_b = 40, 10, 26, 18
+        pw = max(10, w - pad_l - pad_r)
+        ph = max(10, h - pad_t - pad_b)
+
+        if not self.history:
+            painter.setPen(QColor("#475569"))
+            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "No completed tasks this session yet")
+            return
+
+        max_nps = max([pt.get("nps", 0) for pt in self.history] + [100_000])
+        max_nps = max(max_nps * 1.2, 500_000)
+
+        # Horizontal gridline
+        painter.setPen(QPen(QColor("#1e293b"), 1, Qt.DotLine))
+        mid_y = pad_t + ph * 0.5
+        painter.drawLine(pad_l, int(mid_y), pad_l + pw, int(mid_y))
+
+        painter.setFont(QFont("Consolas", 8))
+        painter.setPen(QColor("#64748b"))
+        if max_nps >= 1_000_000:
+            painter.drawText(4, int(pad_t + 10), f"{max_nps/1_000_000:.1f}M")
+        else:
+            painter.drawText(4, int(pad_t + 10), f"{int(max_nps/1000)}k")
+        painter.drawText(10, int(pad_t + ph), "0")
+
+        n = len(self.history)
+        spacing = pw / max(1, n)
+        bar_w = max(4.0, min(24.0, spacing - 4.0))
+
+        painter.setFont(QFont("Consolas", 7))
+        painter.setPen(QColor("#64748b"))
+        for i, pt in enumerate(self.history):
+            val = float(pt.get("nps", 0))
+            bh = min(ph, (val / max_nps) * ph)
+            bx = pad_l + i * spacing + (spacing - bar_w) / 2.0
+            by = pad_t + ph - bh
+            painter.fillRect(int(bx), int(by), int(bar_w), int(bh), QColor("#38bdf8"))
+            ts = pt.get("timestamp", "")
+            if ts and (n <= 5 or i == 0 or i == n - 1 or i == n // 2):
+                painter.drawText(max(0, int(bx - 12)), h - 3, ts)
+
+
+# =============================================================================
+# MAIN WINDOW IMPLEMENTATION
+# =============================================================================
 
 class MainWindow(QMainWindow if HAS_QT else object):
     """Main PySide6 Window for AtomicDB Portable Client."""
@@ -75,7 +354,15 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         self.setWindowTitle("AtomicDB Portable — Windows x64 Computing Client")
         self.setMinimumSize(700, 480)
-        self.resize(1020, 820)
+        self.resize(1020, 840)
+
+        # Graph timeframe options (3 set dials: 1.5 mins, 5 mins, 10 mins)
+        self._timeframe_options = [
+            ("1.5 mins", 90),
+            ("5 mins", 300),
+            ("10 mins", 600),
+        ]
+        self.graph_timeframe_seconds = 300  # Default: 5 mins dial
 
         self._apply_dark_style()
         self._init_ui()
@@ -85,12 +372,11 @@ class MainWindow(QMainWindow if HAS_QT else object):
     def _apply_dark_style(self):
         """Applies a professional dark engineering palette matching fleet console."""
         self.setStyleSheet("""
-            QMainWindow {
+            QMainWindow, QWidget#centralWidget, QWidget#controlsContainer, QScrollArea, QScrollArea > QWidget {
                 background-color: #0b1120;
-                color: #f1f5f9;
-                font-family: 'Segoe UI', 'Plus Jakarta Sans', sans-serif;
             }
             QWidget {
+                background-color: #0b1120;
                 color: #e2e8f0;
                 font-size: 13px;
             }
@@ -103,32 +389,114 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 color: #38bdf8;
                 background-color: #0f172a;
             }
+            QGroupBox QWidget, QGroupBox QLabel, QGroupBox QCheckBox {
+                background-color: transparent;
+            }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 12px;
                 padding: 0 4px;
+                background-color: #0f172a;
             }
             QPushButton {
-                background-color: #0284c7;
-                color: white;
-                border: none;
+                background-color: #0369a1;
+                color: #ffffff;
+                border: 1px solid #38bdf8;
                 padding: 8px 16px;
                 border-radius: 6px;
-                font-weight: 600;
+                font-weight: 700;
             }
             QPushButton:hover {
-                background-color: #0369a1;
+                background-color: #0284c7;
+            }
+            QPushButton:disabled {
+                background-color: #1e293b;
+                color: #94a3b8;
+                border: 1px solid #334155;
+            }
+            QPushButton#btnStart {
+                background-color: #059669;
+                color: #ffffff;
+                border: 2px solid #34d399;
+                font-size: 13px;
+                font-weight: 700;
+                min-height: 36px;
+                padding: 8px 18px;
+                border-radius: 6px;
+            }
+            QPushButton#btnStart:hover {
+                background-color: #047857;
+                border-color: #6ee7b7;
+            }
+            QPushButton#btnStart:pressed {
+                background-color: #065f46;
+            }
+            QPushButton#btnStart:disabled {
+                background-color: #334155;
+                color: #cbd5e1;
+                border: 1px solid #475569;
             }
             QPushButton#btnStop {
                 background-color: #dc2626;
+                color: #ffffff;
+                border: 2px solid #f87171;
+                font-size: 13px;
+                font-weight: 700;
+                min-height: 36px;
+                padding: 8px 18px;
+                border-radius: 6px;
             }
             QPushButton#btnStop:hover {
                 background-color: #b91c1c;
+                border-color: #fca5a5;
+            }
+            QPushButton#btnStop:pressed {
+                background-color: #991b1b;
+            }
+            QPushButton#btnStop:disabled {
+                background-color: #334155;
+                color: #cbd5e1;
+                border: 1px solid #475569;
             }
             QPushButton#btnLocalStop {
-                background-color: #e11d48;
+                background-color: #475569;
+                color: #ffffff;
+                border: 2px solid #94a3b8;
                 font-size: 13px;
-                padding: 10px 18px;
+                font-weight: 700;
+                min-height: 36px;
+                padding: 8px 18px;
+                border-radius: 6px;
+            }
+            QPushButton#btnLocalStop:hover {
+                background-color: #64748b;
+            }
+            QPushButton#btnLocalStop:checked {
+                background-color: #be123c;
+                color: #ffffff;
+                border: 2px solid #fecdd3;
+                font-weight: 700;
+            }
+            QPushButton#btnLocalStop:checked:hover {
+                background-color: #e11d48;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #334155;
+                height: 6px;
+                background: #0f172a;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #0284c7;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #38bdf8;
+                border: 2px solid #f8fafc;
+                width: 16px;
+                height: 16px;
+                margin: -6px 0;
+                border-radius: 9px;
             }
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
                 background-color: #1e293b;
@@ -227,21 +595,32 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
     def _init_ui(self):
         main_widget = QWidget()
+        main_widget.setObjectName("centralWidget")
+        main_widget.setStyleSheet("QWidget#centralWidget { background-color: #0b1120; }")
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
 
         self.main_splitter = QSplitter(Qt.Vertical)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(8)
 
         # Upper pane: Scrollable controls container
         scroll_controls = QScrollArea()
+        scroll_controls.setObjectName("scrollControls")
         scroll_controls.setWidgetResizable(True)
         scroll_controls.setFrameShape(QFrame.NoFrame)
         scroll_controls.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_controls.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_controls.setMinimumHeight(120)
+        scroll_controls.setStyleSheet("QScrollArea#scrollControls { background-color: #0b1120; border: none; }")
+        if scroll_controls.viewport():
+            scroll_controls.viewport().setStyleSheet("background-color: #0b1120; border: none;")
 
         controls_container = QWidget()
+        controls_container.setObjectName("controlsContainer")
+        controls_container.setStyleSheet("QWidget#controlsContainer { background-color: #0b1120; color: #e2e8f0; }")
         controls_layout = QVBoxLayout(controls_container)
         controls_layout.setContentsMargins(4, 4, 4, 4)
         controls_layout.setSpacing(10)
@@ -259,7 +638,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         controls_layout.addLayout(header)
 
         # Telemetry & Resource Monitor Box
-        res_box = QGroupBox("HOST HARDWARE & REAL-TIME TELEMETRY")
+        res_box = QGroupBox("HOST HARDWARE & REAL-TIME TELEMETRY (0.8s REFRESH)")
         res_layout = QVBoxLayout(res_box)
 
         # CPU row
@@ -289,16 +668,11 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         controls_layout.addWidget(res_box)
 
-        # =========================================================================
-        # COMPLETE OPENBENCH CONTRIBUTOR API VARIABLES (INPUTS, NUMBERS, CHECKBOXES)
-        # =========================================================================
+        # Upstream parameters
         cfg_box = QGroupBox("OPENBENCH CONTRIBUTOR API PARAMETERS (UPSTREAM VARIABLES)")
         cfg_layout = QVBoxLayout(cfg_box)
 
-        # 1. Custom Engine & Syzygy paths (Credentials and Server URL are unadjustable & hidden)
         grid_top = QGridLayout()
-
-        # --engine
         grid_top.addWidget(QLabel("Custom Engine (--engine):"), 0, 0)
         self.txt_engine = QLineEdit()
         self.txt_engine.setPlaceholderText("Optional path to custom engine binary (blank = default bundled engine)")
@@ -306,19 +680,15 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.txt_engine.textChanged.connect(self._update_cmd_preview)
         grid_top.addWidget(self.txt_engine, 0, 1)
 
-        # --syzygy
         grid_top.addWidget(QLabel("Syzygy TBs (--syzygy):"), 1, 0)
         self.txt_syzygy = QLineEdit()
         self.txt_syzygy.setPlaceholderText("Directories separated by ; (blank = auto-manage on USB)")
         self.txt_syzygy.setText(self.config.get("openbench", "syzygy_path", default=""))
         self.txt_syzygy.textChanged.connect(self._update_cmd_preview)
         grid_top.addWidget(self.txt_syzygy, 1, 1)
-
         cfg_layout.addLayout(grid_top)
 
-        # 2. Number Spinners (Allocation & Engine updates)
         grid_num = QHBoxLayout()
-
         grid_num.addWidget(QLabel("CPU Mode:"))
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Adaptive", "Balanced", "Maximum", "Custom"])
@@ -327,7 +697,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.combo_mode.currentTextChanged.connect(self._on_mode_changed)
         grid_num.addWidget(self.combo_mode)
 
-        # -T / --threads
         grid_num.addWidget(QLabel("Threads (-T):"))
         self.spin_threads = QSpinBox()
         self.spin_threads.setRange(1, self.resource_mgr.logical_cores)
@@ -335,7 +704,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.spin_threads.valueChanged.connect(self._update_cmd_preview)
         grid_num.addWidget(self.spin_threads)
 
-        # --jobs
         grid_num.addWidget(QLabel("Jobs (--jobs):"))
         self.spin_jobs = QSpinBox()
         self.spin_jobs.setRange(1, 64)
@@ -344,7 +712,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.spin_jobs.valueChanged.connect(self._update_cmd_preview)
         grid_num.addWidget(self.spin_jobs)
 
-        # --hash
         grid_num.addWidget(QLabel("Hash MB (--hash):"))
         self.spin_hash = QSpinBox()
         self.spin_hash.setRange(64, 65536)
@@ -353,7 +720,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.spin_hash.valueChanged.connect(self._update_cmd_preview)
         grid_num.addWidget(self.spin_hash)
 
-        # --engine-update-minutes
         grid_num.addWidget(QLabel("Engine Check Min (--engine-update-minutes):"))
         self.spin_engine_update_min = QDoubleSpinBox()
         self.spin_engine_update_min.setRange(0.5, 1440.0)
@@ -361,45 +727,37 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.spin_engine_update_min.setValue(float(self.config.get("openbench", "engine_update_minutes", default=15.0)))
         self.spin_engine_update_min.valueChanged.connect(self._update_cmd_preview)
         grid_num.addWidget(self.spin_engine_update_min)
-
         cfg_layout.addLayout(grid_num)
 
-        # 3. Checkboxes (All OpenBench Boolean API flags)
         chk_layout = QHBoxLayout()
-
         self.chk_no_fetch_syzygy = QCheckBox("Disable Tablebases (--no-fetch-syzygy)")
-        self.chk_no_fetch_syzygy.setToolTip("Checked: skip Syzygy tablebases (saves disk space/bandwidth)\nUnchecked: download and cache Syzygy 3-4-5 tablebases directly onto this USB drive (zero host C: trace)")
+        self.chk_no_fetch_syzygy.setToolTip("Checked: skip Syzygy tablebases (saves disk/bandwidth)\nUnchecked: auto-manage tablebases on USB")
         self.chk_no_fetch_syzygy.setChecked(self.config.get("openbench", "no_fetch_syzygy", default=True))
         self.chk_no_fetch_syzygy.toggled.connect(self._update_cmd_preview)
         chk_layout.addWidget(self.chk_no_fetch_syzygy)
 
         self.chk_solve = QCheckBox("Solve Tasks (--solve)")
-        self.chk_solve.setToolTip("Serve exhaustive proof solve tasks (gracefully auto-skips without failing tasks if engine lacks custom solve extension)")
+        self.chk_solve.setToolTip("Serve exhaustive proof solve tasks")
         self.chk_solve.setChecked(self.config.get("openbench", "solve", default=False))
         self.chk_solve.toggled.connect(self._update_cmd_preview)
         chk_layout.addWidget(self.chk_solve)
 
         self.chk_no_auto_update = QCheckBox("No Worker Update (--no-auto-update)")
-        self.chk_no_auto_update.setToolTip("Do not auto-update the official worker script from server")
         self.chk_no_auto_update.setChecked(self.config.get("openbench", "no_auto_update", default=False))
         self.chk_no_auto_update.toggled.connect(self._update_cmd_preview)
         chk_layout.addWidget(self.chk_no_auto_update)
 
         self.chk_no_engine_update = QCheckBox("No Engine Update (--no-engine-update)")
-        self.chk_no_engine_update.setToolTip("Do not update/switch the engine binary during run")
         self.chk_no_engine_update.setChecked(self.config.get("openbench", "no_engine_update", default=False))
         self.chk_no_engine_update.toggled.connect(self._update_cmd_preview)
         chk_layout.addWidget(self.chk_no_engine_update)
 
         self.chk_once = QCheckBox("Run Once (--once)")
-        self.chk_once.setToolTip("Run a single analysis pass/task and exit cleanly (useful for verification)")
         self.chk_once.setChecked(self.config.get("openbench", "once", default=False))
         self.chk_once.toggled.connect(self._update_cmd_preview)
         chk_layout.addWidget(self.chk_once)
-
         cfg_layout.addLayout(chk_layout)
 
-        # 4. Command Line Live Preview
         cmd_preview_row = QHBoxLayout()
         cmd_preview_row.addWidget(QLabel("Command Preview:"))
         self.lbl_cmd_preview = QLabel("python atomicdb_worker.py ...")
@@ -412,20 +770,69 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         # Primary Control Bar with LOCAL STOP PRECEDENCE
         ctrl_layout = QHBoxLayout()
+        ctrl_layout.setSpacing(10)
 
-        self.btn_start = QPushButton("Start Contributing")
+        self.btn_start = QPushButton("Start Worker")
+        self.btn_start.setObjectName("btnStart")
+        self.btn_start.setMinimumHeight(40)
+        self.btn_start.setCursor(Qt.PointingHandCursor)
+        self.btn_start.setStyleSheet("""
+            QPushButton#btnStart {
+                background-color: #059669;
+                color: #ffffff;
+                border: 2px solid #34d399;
+                border-radius: 6px;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 8px 18px;
+            }
+            QPushButton#btnStart:hover { background-color: #047857; border-color: #6ee7b7; }
+            QPushButton#btnStart:pressed { background-color: #065f46; }
+            QPushButton#btnStart:disabled { background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }
+        """)
         self.btn_start.clicked.connect(self._start_worker)
         ctrl_layout.addWidget(self.btn_start)
 
-        self.btn_stop = QPushButton("Stop Worker")
+        self.btn_stop = QPushButton("Pause / Stop Worker")
         self.btn_stop.setObjectName("btnStop")
+        self.btn_stop.setMinimumHeight(40)
+        self.btn_stop.setCursor(Qt.PointingHandCursor)
+        self.btn_stop.setStyleSheet("""
+            QPushButton#btnStop {
+                background-color: #dc2626;
+                color: #ffffff;
+                border: 2px solid #f87171;
+                border-radius: 6px;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 8px 18px;
+            }
+            QPushButton#btnStop:hover { background-color: #b91c1c; border-color: #fca5a5; }
+            QPushButton#btnStop:pressed { background-color: #991b1b; }
+            QPushButton#btnStop:disabled { background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }
+        """)
         self.btn_stop.clicked.connect(self._stop_worker)
         self.btn_stop.setEnabled(False)
         ctrl_layout.addWidget(self.btn_stop)
 
-        # Emergency stop button
-        self.btn_local_stop = QPushButton("EMERGENCY STOP (Instant Halt)")
+        self.btn_local_stop = QPushButton("Emergency Stop (Instant Halt)")
         self.btn_local_stop.setObjectName("btnLocalStop")
+        self.btn_local_stop.setMinimumHeight(40)
+        self.btn_local_stop.setCursor(Qt.PointingHandCursor)
+        self.btn_local_stop.setStyleSheet("""
+            QPushButton#btnLocalStop {
+                background-color: #475569;
+                color: #ffffff;
+                border: 2px solid #94a3b8;
+                border-radius: 6px;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 8px 18px;
+            }
+            QPushButton#btnLocalStop:hover { background-color: #64748b; }
+            QPushButton#btnLocalStop:checked { background-color: #be123c; color: #ffffff; border: 2px solid #fecdd3; }
+            QPushButton#btnLocalStop:checked:hover { background-color: #e11d48; }
+        """)
         self.btn_local_stop.setCheckable(True)
         is_local_stopped = self.config.get("safety", "local_stop_active", default=False)
         self.btn_local_stop.setChecked(is_local_stopped)
@@ -437,8 +844,9 @@ class MainWindow(QMainWindow if HAS_QT else object):
         scroll_controls.setWidget(controls_container)
         self.main_splitter.addWidget(scroll_controls)
 
-        # Multi-tab view: 1. Live Analysis Console, 2. Local USB Analytics & History
+        # Multi-tab view: 1. Live Analysis Console, 2. Local USB Diagnostic Dashboard & Graphs
         self.tab_widget = QTabWidget()
+        self.tab_widget.setMinimumHeight(120)
         self.tab_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tab_widget.setStyleSheet("""
             QTabWidget::pane {
@@ -471,13 +879,13 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setMinimumHeight(240)
+        self.console.setMinimumHeight(90)
         self.console.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         tab_console_layout.addWidget(self.console)
 
         console_bar = QHBoxLayout()
         btn_clear_console = QPushButton("Clear Console Screen")
-        btn_clear_console.setStyleSheet("background-color: #1e293b; color: #94a3b8; font-size: 11px; padding: 4px 10px;")
+        btn_clear_console.setStyleSheet("background-color: #1e293b; color: #e2e8f0; border: 1px solid #475569; font-size: 11px; padding: 4px 10px;")
         btn_clear_console.clicked.connect(self.console.clear)
         console_bar.addWidget(btn_clear_console)
 
@@ -494,48 +902,190 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         self.tab_widget.addTab(tab_console, "Live Analysis Console")
 
-        # Tab 2: Local USB Analytics & History
-        tab_analytics = QWidget()
-        tab_analytics_layout = QVBoxLayout(tab_analytics)
+        # Tab 2: Diagnostic Data Dashboard & Real-Time Graphs
+        tab_analytics_scroll = QScrollArea()
+        tab_analytics_scroll.setObjectName("scrollAnalytics")
+        tab_analytics_scroll.setWidgetResizable(True)
+        tab_analytics_scroll.setFrameShape(QFrame.NoFrame)
+        tab_analytics_scroll.setStyleSheet("QScrollArea#scrollAnalytics { background-color: #0b1120; border: none; }")
+        if tab_analytics_scroll.viewport():
+            tab_analytics_scroll.viewport().setStyleSheet("background-color: #0b1120; border: none;")
+
+        tab_analytics_content = QWidget()
+        tab_analytics_layout = QVBoxLayout(tab_analytics_content)
         tab_analytics_layout.setContentsMargins(8, 8, 8, 8)
+        tab_analytics_layout.setSpacing(10)
 
-        # KPI Summary Grid Cards
-        kpi_group = QGroupBox("LOCAL USB METRICS & HISTORICAL RUNTIME COUNTERS")
-        kpi_layout = QGridLayout(kpi_group)
-
-        self.lbl_tasks_completed = QLabel("0")
-        self.lbl_tasks_completed.setStyleSheet("font-size: 20px; font-weight: bold; color: #38bdf8;")
-        self.lbl_total_nodes = QLabel("0")
-        self.lbl_total_nodes.setStyleSheet("font-size: 20px; font-weight: bold; color: #4ade80;")
-        self.lbl_avg_nodes = QLabel("0")
-        self.lbl_avg_nodes.setStyleSheet("font-size: 20px; font-weight: bold; color: #fbbf24;")
-        self.lbl_avg_nps = QLabel("0")
-        self.lbl_avg_nps.setStyleSheet("font-size: 20px; font-weight: bold; color: #a78bfa;")
-        self.lbl_tb_hits = QLabel("0")
-        self.lbl_tb_hits.setStyleSheet("font-size: 20px; font-weight: bold; color: #f472b6;")
-        self.lbl_crashes = QLabel("0")
-        self.lbl_crashes.setStyleSheet("font-size: 20px; font-weight: bold; color: #ef4444;")
-
-        def make_card(title: str, widget: QLabel):
+        def make_card(title: str, widget: QLabel, subtext: str = ""):
             box = QWidget()
             layout = QVBoxLayout(box)
             layout.setContentsMargins(4, 4, 4, 4)
-            lbl_title = QLabel(title)
-            lbl_title.setStyleSheet("color: #94a3b8; font-size: 11px; text-transform: uppercase;")
-            layout.addWidget(lbl_title)
+            lbl_t = QLabel(title)
+            lbl_t.setStyleSheet("color: #94a3b8; font-size: 10px; text-transform: uppercase; font-weight: 600;")
+            layout.addWidget(lbl_t)
             layout.addWidget(widget)
+            if subtext:
+                lbl_sub = QLabel(subtext)
+                lbl_sub.setStyleSheet("color: #64748b; font-size: 10px;")
+                layout.addWidget(lbl_sub)
             return box
 
-        kpi_layout.addWidget(make_card("Tasks Completed", self.lbl_tasks_completed), 0, 0)
-        kpi_layout.addWidget(make_card("Total Nodes", self.lbl_total_nodes), 0, 1)
-        kpi_layout.addWidget(make_card("Avg Nodes / Task", self.lbl_avg_nodes), 0, 2)
-        kpi_layout.addWidget(make_card("Avg NPS (Speed)", self.lbl_avg_nps), 0, 3)
-        kpi_layout.addWidget(make_card("Tablebase Hits", self.lbl_tb_hits), 0, 4)
-        kpi_layout.addWidget(make_card("Engine Failures / Crashes", self.lbl_crashes), 0, 5)
+        # =========================================================================
+        # 1. CURRENT TASK (REAL-TIME EXECUTION & ESTIMATED COMPLETION)
+        # =========================================================================
+        grp_cur = QGroupBox("CURRENT TASK (REAL-TIME EXECUTION & ESTIMATED COMPLETION)")
+        grp_cur_layout = QVBoxLayout(grp_cur)
 
-        tab_analytics_layout.addWidget(kpi_group)
+        cur_kpi_layout = QGridLayout()
+        self.lbl_cur_task_id = QLabel("IDLE")
+        self.lbl_cur_task_id.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8; font-family: monospace;")
+        self.lbl_cur_task_nodes = QLabel("-")
+        self.lbl_cur_task_nodes.setStyleSheet("font-size: 18px; font-weight: bold; color: #4ade80;")
+        self.lbl_cur_task_eta = QLabel("Calculating...")
+        self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24;")
+        self.lbl_cur_nps = QLabel("0 /s")
+        self.lbl_cur_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #a78bfa;")
 
-        # Recent Tasks Table
+        cur_kpi_layout.addWidget(make_card("Task ID", self.lbl_cur_task_id, "Active worker slot"), 0, 0)
+        cur_kpi_layout.addWidget(make_card("Nodes in Task", self.lbl_cur_task_nodes, "Target search budget"), 0, 1)
+        cur_kpi_layout.addWidget(make_card("Est. Time Remaining", self.lbl_cur_task_eta, "Based on avg NPS of last 3 tasks"), 0, 2)
+        cur_kpi_layout.addWidget(make_card("Current NPS", self.lbl_cur_nps, "Live engine speed"), 0, 3)
+        grp_cur_layout.addLayout(cur_kpi_layout)
+
+        # Calculating Line (Monospace display)
+        line_box = QHBoxLayout()
+        line_box.addWidget(QLabel("Calculating Line:"))
+        self.lbl_cur_line = QLabel("Idle (waiting for next task from server)")
+        self.lbl_cur_line.setStyleSheet(
+            "background-color: #020617; color: #38bdf8; border: 1px solid #1e293b; "
+            "padding: 6px 10px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 11px;"
+        )
+        self.lbl_cur_line.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        line_box.addWidget(self.lbl_cur_line)
+        grp_cur_layout.addLayout(line_box)
+
+        lbl_cur_hint = QLabel("Saved automatically to /logs/current_task.log and /logs/activity.log on this USB drive")
+        lbl_cur_hint.setStyleSheet("color: #64748b; font-size: 10px;")
+        grp_cur_layout.addWidget(lbl_cur_hint)
+        tab_analytics_layout.addWidget(grp_cur)
+
+        # =========================================================================
+        # 2. SESSION STATISTICS (THIS SESSION)
+        # =========================================================================
+        grp_session = QGroupBox("SESSION STATISTICS (SAVED TO /logs/session_statistics.log)")
+        grp_session_layout = QVBoxLayout(grp_session)
+        session_kpi_layout = QGridLayout()
+
+        self.lbl_session_tasks = QLabel("0")
+        self.lbl_session_tasks.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
+        self.lbl_session_nodes = QLabel("0")
+        self.lbl_session_nodes.setStyleSheet("font-size: 18px; font-weight: bold; color: #4ade80;")
+        self.lbl_session_nps = QLabel("0 /s")
+        self.lbl_session_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
+        self.lbl_session_avg_nps = QLabel("0 /s")
+        self.lbl_session_avg_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #a78bfa;")
+        self.lbl_session_uptime = QLabel("00:00:00")
+        self.lbl_session_uptime.setStyleSheet("font-size: 18px; font-weight: bold; color: #f472b6; font-family: monospace;")
+
+        session_kpi_layout.addWidget(make_card("Tasks This Session", self.lbl_session_tasks), 0, 0)
+        session_kpi_layout.addWidget(make_card("Total Nodes This Session", self.lbl_session_nodes), 0, 1)
+        session_kpi_layout.addWidget(make_card("Current NPS", self.lbl_session_nps), 0, 2)
+        session_kpi_layout.addWidget(make_card("Average NPS This Session", self.lbl_session_avg_nps), 0, 3)
+        session_kpi_layout.addWidget(make_card("Session Uptime", self.lbl_session_uptime), 0, 4)
+        grp_session_layout.addLayout(session_kpi_layout)
+        tab_analytics_layout.addWidget(grp_session)
+
+        # =========================================================================
+        # 3. LIFETIME STATISTICS (PERMANENT USB REPORT — NEVER CLEARED)
+        # =========================================================================
+        grp_lt = QGroupBox("LIFETIME STATISTICS (SAVED TO /logs/lifetime_statistics.txt — PERMANENTLY PRESERVED)")
+        grp_lt_layout = QVBoxLayout(grp_lt)
+        lt_kpi_layout = QGridLayout()
+
+        self.lbl_lt_tasks = QLabel("0")
+        self.lbl_lt_tasks.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
+        self.lbl_lt_nodes = QLabel("0")
+        self.lbl_lt_nodes.setStyleSheet("font-size: 18px; font-weight: bold; color: #4ade80;")
+        self.lbl_lt_avg_nps = QLabel("0 /s")
+        self.lbl_lt_avg_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24;")
+        self.lbl_lt_runtime = QLabel("0s")
+        self.lbl_lt_runtime.setStyleSheet("font-size: 18px; font-weight: bold; color: #a78bfa;")
+        self.lbl_lt_cpu_hours = QLabel("0.00 hrs")
+        self.lbl_lt_cpu_hours.setStyleSheet("font-size: 18px; font-weight: bold; color: #f472b6;")
+        self.lbl_lt_sessions = QLabel("1")
+        self.lbl_lt_sessions.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
+
+        lt_kpi_layout.addWidget(make_card("Total Tasks Completed", self.lbl_lt_tasks), 0, 0)
+        lt_kpi_layout.addWidget(make_card("Total Lifetime Nodes", self.lbl_lt_nodes), 0, 1)
+        lt_kpi_layout.addWidget(make_card("Lifetime Average NPS", self.lbl_lt_avg_nps), 0, 2)
+        lt_kpi_layout.addWidget(make_card("Total Accumulated Runtime", self.lbl_lt_runtime), 0, 3)
+        lt_kpi_layout.addWidget(make_card("Total CPU Hours", self.lbl_lt_cpu_hours), 0, 4)
+        lt_kpi_layout.addWidget(make_card("Total Number of Sessions", self.lbl_lt_sessions), 0, 5)
+        grp_lt_layout.addLayout(lt_kpi_layout)
+
+        lbl_lt_hint = QLabel("Lifetime statistics are recorded permanently on this USB thumb drive and are strictly preserved across sessions.")
+        lbl_lt_hint.setStyleSheet("color: #64748b; font-size: 10px;")
+        grp_lt_layout.addWidget(lbl_lt_hint)
+        tab_analytics_layout.addWidget(grp_lt)
+
+        # =========================================================================
+        # 4. GRAPHS (THIS SESSION — 0.8s TELEMETRY + TIMEFRAME SLIDER)
+        # =========================================================================
+        grp_graphs = QGroupBox("REAL-TIME SESSION GRAPHS (0.8s HARDWARE REFRESH)")
+        grp_graphs_outer = QVBoxLayout(grp_graphs)
+        grp_graphs_outer.setSpacing(8)
+
+        # Timeframe slider bar with set dials at 1.5 mins, 5 mins, and 10 mins
+        tf_bar = QHBoxLayout()
+        tf_bar.setSpacing(8)
+        lbl_tf_title = QLabel("Graph Timeframe:")
+        lbl_tf_title.setStyleSheet("color: #cbd5e1; font-weight: 600; font-size: 11px;")
+        tf_bar.addWidget(lbl_tf_title)
+
+        self.slider_timeframe = QSlider(Qt.Horizontal)
+        self.slider_timeframe.setObjectName("sliderTimeframe")
+        self.slider_timeframe.setRange(0, len(self._timeframe_options) - 1)
+        self.slider_timeframe.setSingleStep(1)
+        self.slider_timeframe.setPageStep(1)
+        self.slider_timeframe.setTickInterval(1)
+        self.slider_timeframe.setTickPosition(QSlider.TicksBelow)
+        self.slider_timeframe.setFixedWidth(160)
+        self.slider_timeframe.setValue(1)  # 5 mins default
+        self.slider_timeframe.valueChanged.connect(self._on_timeframe_slider_changed)
+        tf_bar.addWidget(self.slider_timeframe)
+
+        self._tf_dial_buttons: List[QPushButton] = []
+        for idx, (label_txt, _secs) in enumerate(self._timeframe_options):
+            dial_btn = QPushButton(label_txt)
+            dial_btn.setCursor(Qt.PointingHandCursor)
+            dial_btn.clicked.connect(lambda _checked=False, i=idx: self.slider_timeframe.setValue(i))
+            self._tf_dial_buttons.append(dial_btn)
+            tf_bar.addWidget(dial_btn)
+
+        tf_bar.addStretch()
+        self.lbl_graph_timeframe = QLabel("Window: 5 mins")
+        self.lbl_graph_timeframe.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px; font-weight: 600;")
+        tf_bar.addWidget(self.lbl_graph_timeframe)
+        self._update_timeframe_dial_styles(1)
+
+        grp_graphs_outer.addLayout(tf_bar)
+
+        grp_graphs_layout = QHBoxLayout()
+        grp_graphs_layout.setSpacing(8)
+
+        self.chart_cpu = CPUChartWidget()
+        self.chart_ram = RAMChartWidget()
+        self.chart_nps = NPSChartWidget()
+
+        grp_graphs_layout.addWidget(self.chart_cpu)
+        grp_graphs_layout.addWidget(self.chart_ram)
+        grp_graphs_layout.addWidget(self.chart_nps)
+        grp_graphs_outer.addLayout(grp_graphs_layout)
+        tab_analytics_layout.addWidget(grp_graphs)
+
+        # =========================================================================
+        # 5. PERSISTENT TASK EXECUTION HISTORY
+        # =========================================================================
         table_group = QGroupBox("PERSISTENT TASK EXECUTION HISTORY (Saved to USB /logs/history.json)")
         table_layout = QVBoxLayout(table_group)
 
@@ -544,7 +1094,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.table_tasks.setHorizontalHeaderLabels(["Timestamp", "Task ID", "Type", "Nodes", "NPS", "TB WDL/DTZ", "Result / Score"])
         self.table_tasks.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_tasks.setAlternatingRowColors(True)
-        self.table_tasks.setMinimumHeight(280)
+        self.table_tasks.setMinimumHeight(120)
         self.table_tasks.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.table_tasks.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table_tasks.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -568,10 +1118,9 @@ class MainWindow(QMainWindow if HAS_QT else object):
         """)
         table_layout.addWidget(self.table_tasks)
 
-        # Local USB Storage path indicator
         storage_bar = QHBoxLayout()
         logs_path = os.path.join(self.config.base_dir, "logs")
-        self.lbl_storage_info = QLabel(f"USB Storage: {logs_path} (history.json, analytics.json, crashes.log, activity.log)")
+        self.lbl_storage_info = QLabel(f"USB Storage: {logs_path} (lifetime_statistics.txt, session_statistics.log, current_task.log, history.json)")
         self.lbl_storage_info.setStyleSheet("color: #64748b; font-size: 11px;")
         storage_bar.addWidget(self.lbl_storage_info)
         storage_bar.addStretch()
@@ -585,22 +1134,21 @@ class MainWindow(QMainWindow if HAS_QT else object):
         table_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         tab_analytics_layout.addWidget(table_group)
 
-        self.tab_widget.addTab(tab_analytics, "USB Analytics & Task History")
+        tab_analytics_scroll.setWidget(tab_analytics_content)
+        self.tab_widget.addTab(tab_analytics_scroll, "USB Diagnostic Dashboard & Graphs")
         self.main_splitter.addWidget(self.tab_widget)
-        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([330, 470])
+        self.main_splitter.setSizes([380, 460])
         main_layout.addWidget(self.main_splitter)
 
-        # Initial load of analytics data into UI if logger present
         if self.analytics_logger:
             self._update_analytics_ui(self.analytics_logger.get_summary())
 
-        # Signals
         self.signals.log_received.connect(self._append_log)
 
     def _update_cmd_preview(self):
-        """Generates real-time preview of the exact invocation command (credentials & server URL hidden)."""
+        """Generates real-time preview of the exact invocation command."""
         t = self.spin_threads.value()
         h = self.spin_hash.value()
         j = self.spin_jobs.value()
@@ -639,10 +1187,8 @@ class MainWindow(QMainWindow if HAS_QT else object):
     def _update_local_stop_button_text(self, stopped: bool):
         if stopped:
             self.btn_local_stop.setText("EMERGENCY STOP ENGAGED (Worker Halted)")
-            self.btn_local_stop.setStyleSheet("background-color: #e11d48; font-weight: bold; border: 2px solid white;")
         else:
             self.btn_local_stop.setText("Emergency Stop (Instant Halt)")
-            self.btn_local_stop.setStyleSheet("background-color: #475569;")
 
     def _on_local_stop_toggled(self, checked: bool):
         self.config.set("safety", "local_stop_active", checked)
@@ -659,31 +1205,63 @@ class MainWindow(QMainWindow if HAS_QT else object):
         threads, hash_mb = self.resource_mgr.compute_allocation(mode)
         self.spin_threads.setValue(threads)
         self.spin_hash.setValue(hash_mb)
+        if self.analytics_logger:
+            self.analytics_logger.set_active_threads(threads)
         self._append_log(f"[CONFIG] Switched CPU mode to {mode}. Recommended: {threads} threads, {hash_mb}MB hash.")
         self._update_cmd_preview()
 
     def _setup_timers(self):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll_tick)
-        self.timer.start(2500)
+        self.timer.start(800)  # High-frequency hardware telemetry refresh every 0.8 seconds
+
+        self.eta_timer = QTimer(self)
+        self.eta_timer.timeout.connect(self._refresh_eta_1s)
+        self.eta_timer.start(1000)  # Exact 1-second refresh for ETA countdown & session uptime
+
+    def _refresh_eta_1s(self):
+        """Refreshes ETA countdown (including negative values when overdue) and session uptime every 1 second."""
+        if not self.analytics_logger:
+            return
+        self.lbl_session_uptime.setText(self.analytics_logger.get_session_uptime_str())
+        if self.analytics_logger.current_task_id:
+            eta = self.analytics_logger.calculate_estimated_time_remaining()
+            eta_str = self.analytics_logger.format_eta_str(eta)
+            self.lbl_cur_task_eta.setText(eta_str)
+            if eta is not None and eta < 0:
+                self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fb7185; font-family: monospace;")
+            else:
+                self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24; font-family: monospace;")
+        else:
+            self.lbl_cur_task_eta.setText("-")
+            self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24;")
 
     def _poll_tick(self):
         snapshot = self.resource_mgr.get_system_snapshot(self.worker_mgr.current_pid)
-        self.bar_sys_cpu.setValue(int(snapshot["system_cpu_pct"]))
-        self.bar_worker_cpu.setValue(int(snapshot["worker_cpu_pct"]))
+        sys_cpu = snapshot["system_cpu_pct"]
+        worker_cpu = snapshot["worker_cpu_pct"]
+        worker_ram = snapshot["worker_ram_mb"]
+        avail_ram = snapshot["available_ram_mb"]
 
-        # Check adaptive hysteresis
-        allocation_changed = self.resource_mgr.update_adaptive_state(snapshot["system_cpu_pct"])
+        self.bar_sys_cpu.setValue(int(sys_cpu))
+        self.bar_worker_cpu.setValue(int(worker_cpu))
+        self.lbl_ram_details.setText(f"Worker RSS: {worker_ram} MB | Host Avail: {avail_ram} MB")
+
+        # Feed real-time hardware sample to analytics_logger for session graphs (0.8s cadence)
+        if self.analytics_logger:
+            self.analytics_logger.set_active_threads(self.spin_threads.value())
+            self.analytics_logger.record_hardware_sample(
+                sys_cpu=sys_cpu,
+                worker_cpu=worker_cpu,
+                worker_ram_mb=worker_ram,
+                available_ram_mb=avail_ram
+            )
+            self._update_graph_views()
+
+        # Check adaptive hysteresis (evaluates every 20 seconds internally)
+        allocation_changed = self.resource_mgr.update_adaptive_state(sys_cpu)
         if allocation_changed and self.worker_mgr.is_running:
             self._append_log("[ADAPTIVE] System load threshold triggered. Adjusting worker parameters gracefully...")
-
-        ram_used = snapshot["worker_ram_mb"]
-        avail_ram = snapshot["available_ram_mb"]
-        self.lbl_ram_details.setText(f"Worker RSS: {ram_used} MB | Host Avail: {avail_ram} MB")
-
-        status_str = "ACTIVE" if self.worker_mgr.is_running else "IDLE"
-        if snapshot["is_throttled"]:
-            status_str = "THROTTLED"
 
         # Auto-restore buttons if worker stopped
         if not self.worker_mgr.is_running and self.btn_stop.isEnabled():
@@ -694,7 +1272,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
         user = "PortableExe"
         stored_enc = self.config.get("openbench", "password_encrypted", default="")
         pwd = self.security.caesar_decrypt(stored_enc) if stored_enc else "ExePassword"
-        # Server URL is fixed, unadjustable and hidden from user interface
         server_url = "https://belzedar.duckdns.org"
 
         threads = self.spin_threads.value()
@@ -709,21 +1286,8 @@ class MainWindow(QMainWindow if HAS_QT else object):
         engine_update_min = self.spin_engine_update_min.value()
         once = self.chk_once.isChecked()
 
-        # Save all settings into portable configuration (password encrypted with Caesar cipher)
-        self.config.set("openbench", "server", server_url)
-        self.config.set("openbench", "username", "PortableExe")
-        self.config.set("openbench", "password_encrypted", self.security.caesar_encrypt(pwd))
-        self.config.set("openbench", "jobs", jobs)
-        self.config.set("openbench", "engine_path", engine_path)
-        self.config.set("openbench", "syzygy_path", syzygy_path)
-        self.config.set("openbench", "no_fetch_syzygy", no_fetch_syzygy)
-        self.config.set("openbench", "solve", solve)
-        self.config.set("openbench", "no_auto_update", no_auto_update)
-        self.config.set("openbench", "no_engine_update", no_engine_update)
-        self.config.set("openbench", "engine_update_minutes", engine_update_min)
-        self.config.set("openbench", "once", once)
-        self.config.set("resources", "threads", threads)
-        self.config.set("resources", "hash_mb", hash_mb)
+        if self.analytics_logger:
+            self.analytics_logger.set_active_threads(threads)
 
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -763,54 +1327,120 @@ class MainWindow(QMainWindow if HAS_QT else object):
             self.analytics_logger.load_persisted_data()
             self._update_analytics_ui(self.analytics_logger.get_summary())
 
+    def _update_timeframe_dial_styles(self, active_idx: int):
+        """Highlights the active timeframe dial button (1.5 mins, 5 mins, 10 mins)."""
+        for idx, btn in enumerate(getattr(self, "_tf_dial_buttons", [])):
+            if idx == active_idx:
+                btn.setStyleSheet(
+                    "background-color: #0284c7; color: #ffffff; border: 1px solid #38bdf8; "
+                    "border-radius: 4px; font-size: 11px; font-weight: 700; padding: 3px 10px;"
+                )
+            else:
+                btn.setStyleSheet(
+                    "background-color: #1e293b; color: #cbd5e1; border: 1px solid #475569; "
+                    "border-radius: 4px; font-size: 11px; font-weight: 600; padding: 3px 10px;"
+                )
+
+    def _on_timeframe_slider_changed(self, idx: int):
+        """Handles timeframe slider dial switches across 1.5 mins, 5 mins, and 10 mins."""
+        idx = max(0, min(len(self._timeframe_options) - 1, int(idx)))
+        label_txt, secs = self._timeframe_options[idx]
+        self.graph_timeframe_seconds = secs
+        if hasattr(self, "lbl_graph_timeframe"):
+            self.lbl_graph_timeframe.setText(f"Window: {label_txt}")
+        self._update_timeframe_dial_styles(idx)
+        self._update_graph_views()
+
+    def _update_graph_views(self, summary: Optional[dict] = None):
+        """Updates CPU, RAM, and NPS charts filtered by the active graph timeframe dial."""
+        now = time.time()
+        window = getattr(self, "graph_timeframe_seconds", 300)
+        if summary is not None:
+            cpu_src = summary.get("cpu_history", [])
+            ram_src = summary.get("ram_history", [])
+            nps_src = summary.get("nps_task_history", [])
+        elif self.analytics_logger:
+            cpu_src = self.analytics_logger.cpu_history
+            ram_src = self.analytics_logger.ram_history
+            nps_src = self.analytics_logger.nps_task_history
+        else:
+            cpu_src, ram_src, nps_src = [], [], []
+
+        self.chart_cpu.update_data(AnalyticsLogger.filter_history_by_timeframe(cpu_src, window, now))
+        self.chart_ram.update_data(AnalyticsLogger.filter_history_by_timeframe(ram_src, window, now))
+        self.chart_nps.update_data(AnalyticsLogger.filter_history_by_timeframe(nps_src, window, now))
+
+    def _format_nodes(self, n: int) -> str:
+        return format_nodes_compact(n)
+
+    def _format_nps(self, n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.2f} M/s"
+        elif n >= 1_000:
+            return f"{n / 1_000:.1f} k/s"
+        return f"{n:,} /s"
+
     def _update_analytics_ui(self, summary: dict):
-        """Updates KPI counters and tasks table on USB analytics signal."""
+        """Updates all dashboard sections (Current Task, Session, Lifetime, and Graphs)."""
         try:
-            total_tasks = summary.get("total_tasks_completed", 0)
-            total_nodes = summary.get("total_nodes_analyzed", 0)
-            avg_nodes = summary.get("average_nodes_per_task", 0)
-            avg_nps = summary.get("average_nps", 0)
-            tb_hits = summary.get("tablebase_hits", 0)
-            crashes = summary.get("crashes", 0)
-
-            self.lbl_tasks_completed.setText(f"{total_tasks:,}")
-            if total_nodes >= 1_000_000_000:
-                self.lbl_total_nodes.setText(f"{total_nodes / 1_000_000_000:.2f} B")
-            elif total_nodes >= 1_000_000:
-                self.lbl_total_nodes.setText(f"{total_nodes / 1_000_000:.2f} M")
+            # 1. CURRENT TASK
+            cur_id = summary.get("current_task_id")
+            if cur_id:
+                self.lbl_cur_task_id.setText(str(cur_id))
+                self.lbl_cur_task_nodes.setText(self._format_nodes(summary.get('current_task_nodes', 0)))
+                eta_val = summary.get("current_task_eta_seconds")
+                self.lbl_cur_task_eta.setText(summary.get("current_task_eta_str", "Calculating..."))
+                if eta_val is not None and eta_val < 0:
+                    self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fb7185; font-family: monospace;")
+                else:
+                    self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24; font-family: monospace;")
+                self.lbl_cur_nps.setText(self._format_nps(summary.get("current_nps", 0)))
+                self.lbl_cur_line.setText(summary.get("current_task_line", "Processing search moves..."))
             else:
-                self.lbl_total_nodes.setText(f"{total_nodes:,}")
+                self.lbl_cur_task_id.setText("IDLE")
+                self.lbl_cur_task_nodes.setText("-")
+                self.lbl_cur_task_eta.setText("-")
+                self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24;")
+                self.lbl_cur_nps.setText("0 /s")
+                self.lbl_cur_line.setText("Idle (waiting for next task from server)")
 
-            if avg_nodes >= 1_000_000:
-                self.lbl_avg_nodes.setText(f"{avg_nodes / 1_000_000:.2f} M")
-            else:
-                self.lbl_avg_nodes.setText(f"{avg_nodes:,}")
+            # 2. SESSION STATISTICS
+            self.lbl_session_tasks.setText(f"{summary.get('session_tasks_completed', 0):,}")
+            self.lbl_session_nodes.setText(self._format_nodes(summary.get("session_total_nodes", 0)))
+            self.lbl_session_nps.setText(self._format_nps(summary.get("current_nps", 0)))
+            self.lbl_session_avg_nps.setText(self._format_nps(summary.get("session_average_nps", 0)))
+            self.lbl_session_uptime.setText(summary.get("session_uptime_str", "00:00:00"))
 
-            if avg_nps >= 1_000_000:
-                self.lbl_avg_nps.setText(f"{avg_nps / 1_000_000:.2f} M/s")
-            elif avg_nps >= 1_000:
-                self.lbl_avg_nps.setText(f"{avg_nps / 1_000:.1f} k/s")
-            else:
-                self.lbl_avg_nps.setText(f"{avg_nps:,}/s")
+            # 3. LIFETIME STATISTICS
+            self.lbl_lt_tasks.setText(f"{summary.get('lifetime_tasks_completed', 0):,}")
+            self.lbl_lt_nodes.setText(self._format_nodes(summary.get("lifetime_total_nodes", 0)))
+            self.lbl_lt_avg_nps.setText(self._format_nps(summary.get("lifetime_average_nps", 0)))
+            self.lbl_lt_runtime.setText(summary.get("lifetime_total_runtime_str", "0s"))
+            ch = summary.get('lifetime_cpu_hours', 0.0)
+            self.lbl_lt_cpu_hours.setText(f"{ch:.4f} hrs" if (0 < ch < 0.1) else f"{ch:.2f} hrs")
+            self.lbl_lt_sessions.setText(f"{summary.get('lifetime_total_sessions', 1):,}")
 
-            self.lbl_tb_hits.setText(f"{tb_hits:,}")
-            self.lbl_crashes.setText(f"{crashes:,}")
+            # 4. GRAPHS (THIS SESSION, filtered by active timeframe slider)
+            self._update_graph_views(summary)
 
+            # 5. RECENT TASKS TABLE
             recent = summary.get("recent_tasks", [])
             self.table_tasks.setRowCount(len(recent))
             for row_idx, task in enumerate(recent):
                 ts = task.get("timestamp", "")
-                if "T" in ts:
-                    ts = ts.split("T")[1][:8]
+                if " " in ts:
+                    ts = ts.split(" ")[1]
                 task_id = str(task.get("task_id", ""))
                 task_type = str(task.get("type", "engine")).upper()
-                nodes = f"{task.get('nodes', 0):,}"
+                nodes = self._format_nodes(task.get('nodes', 0))
                 nps = f"{task.get('nps', 0):,}"
                 tb_info = "-"
-                if task.get("is_tb"):
-                    tb_info = f"wdl={task.get('wdl')}"
-                    if task.get("dtz") is not None:
-                        tb_info += f" dtz={task.get('dtz')}"
+                if task.get("wdl") is not None or task.get("tb_wdl") is not None:
+                    w = task.get("wdl") if task.get("wdl") is not None else task.get("tb_wdl")
+                    tb_info = f"wdl={w}"
+                    d = task.get("dtz") if task.get("dtz") is not None else task.get("tb_dtz")
+                    if d is not None:
+                        tb_info += f" dtz={d}"
                 result = str(task.get("summary", ""))
 
                 items = [
@@ -827,4 +1457,3 @@ class MainWindow(QMainWindow if HAS_QT else object):
                     self.table_tasks.setItem(row_idx, col_idx, item)
         except Exception as e:
             logger.debug(f"Error updating analytics UI: {e}")
-

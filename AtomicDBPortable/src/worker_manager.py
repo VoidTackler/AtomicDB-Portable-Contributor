@@ -259,6 +259,11 @@ class WorkerManager:
                 self.analytics_logger.parse_worker_line(text)
             except Exception as e:
                 logger.debug(f"Analytics parse error: {e}")
+
+        # Keep operator console clean - telemetry lines update the dashboard without clogging console
+        if text.startswith("task pv:") or text.startswith("task progress:"):
+            return
+
         for cb in self.log_callbacks:
             try:
                 cb(text)

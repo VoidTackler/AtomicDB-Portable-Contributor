@@ -52,8 +52,16 @@ On any Windows 10/11 x64 computer with Python 3.8+ (64-bit) installed:
 
 ## Features
 
+- **Standalone Single File & Post-Build Cleanup**: `build.bat` / `build_exe.py` outputs a single standalone `AtomicDB.exe` and automatically cleans up all intermediate build artifacts, `dist/`, `build/`, and bytecode caches.
 - **Zero Footprint on Host**: All temporary files, engine binaries, and logs are kept strictly on the USB storage drive (zero trace left on host `C:` drive).
-- **No Tablebase by Default**: Automatically runs with `--no-fetch-syzygy` enabled to avoid downloading large tablebases to the host machine.
-- **Adaptive Hardware Control**: Automatically throttles worker CPU threads if user activity spikes on the host machine to prevent system lag.
+- **Adaptive Mode with 50% Cores Reserved**: Leaves 50% of the computer's cores off (rounded up to 1 if below one), updating on an unobtrusive 20-second hysteresis cycle.
+- **High-Speed Telemetry (0.8s Refresh)**: Real-time worker and system CPU/RAM monitoring refreshes every 0.8 seconds.
+- **Diagnostic Data Dashboard & Session Graphs**:
+  - **Session Statistics**: Tasks completed, total nodes, current NPS, average NPS, and digital session uptime (saved in `logs/session_statistics.log`).
+  - **Current Task Monitor**: Real-time task ID, budget nodes, line being calculated (candidate moves / PV / FEN), and remaining ETA based on the average NPS of the last 3 completed tasks (saved in `logs/current_task.log`).
+  - **Lifetime Statistics (`logs/lifetime_statistics.txt`)**: Permanently tracks total tasks, lifetime nodes, lifetime average NPS, accumulated runtime, CPU hours, and total sessions across all portable runs. **Log files are strictly never cleared**.
+  - **Real-time Session Graphs**: Native vector-drawn visual graphs for CPU usage over time (System vs Worker %), RAM usage over time (Worker RSS vs Available MB), and NPS per task speed trend.
+- **Persistent Local USB Analytics**: Detailed execution logs and performance metrics (`history.json`, `analytics.json`, `crashes.log`, `session_statistics.log`, `current_task.log`, `lifetime_statistics.txt`) stored right on the USB drive.
 - **Emergency Local Stop**: A single-click override allows the local operator to instantly halt all analysis.
 - **Offline Dependency Pre-Downloader**: Double-click `download_dependencies.bat` to pre-fetch required engine files directly to your USB drive before connecting to target machines.
+

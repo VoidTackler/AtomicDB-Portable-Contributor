@@ -1135,9 +1135,10 @@ class Engine:
                 break
             if progress:
                 found_nodes = re.search(r' nodes (\d+)', line)
+                found_nps = re.search(r' nps (\d+)', line)
                 if found_nodes:
-                    progress(int(found_nodes.group(1)),
-                             max(time.monotonic() - started, 1e-6))
+                    nodes_cnt = int(found_nodes.group(1))
+                    progress(nodes_cnt, max(time.monotonic() - started, 1e-6))
             m = re.match(
                 r'info depth \d+ seldepth \d+ multipv (\d+) score '
                 r'(cp|mate) (-?\d+) .*? pv (.+)', line)
@@ -1145,6 +1146,8 @@ class Engine:
                 idx = int(m.group(1))
                 kind, val = m.group(2), int(m.group(3))
                 pv = m.group(4).split()
+                if idx == 1:
+                    print(f"task pv: {' '.join(pv[:10])}", flush=True)
                 entry = {'move': pv[0], 'pv': pv,
                          'eval_cp': None, 'mate': None,
                          'raw': line.strip()}
@@ -2322,6 +2325,7 @@ def _solve_once(server, auth, solver, lease_session, current_task=None):
     task = tasks[0]
     if current_task is not None:
         current_task.start(task['id'], task.get('lease_token', ''))
+    print(f"starting solve task {task['id']} ({task.get('budget_nodes', 0)}n) calculating: solve {task['fen']} goal {task.get('goal', 'WHITE_WIN')}", flush=True)
     try:
         try:
             outcome, pn, dn, nodes, elapsed, certificate, telemetry = \
@@ -2610,6 +2614,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             if stop.is_set():
                 break          # still held: the stop hands it back
             current_task.start(t['id'], t.get('lease_token', ''))
+            print(f"[{slot}] starting task {t['id']} ({t.get('budget_nodes', 0)}n) calculating: {t['fen']}", flush=True)
             t0 = time.time()
             wdl, dtz = probe_tb(tb, t['fen'])
             if wdl is not None:

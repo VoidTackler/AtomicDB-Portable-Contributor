@@ -48,6 +48,7 @@ class TestResourceAllocation(unittest.TestCase):
         rm = ResourceManager(mode="Adaptive")
         rm.system_cpu_threshold_pct = 80.0
         rm.hysteresis_target_cycles = 3
+        rm.adaptive_check_interval = 0.0
 
         self.assertFalse(rm.is_throttled)
 
@@ -75,6 +76,35 @@ class TestResourceAllocation(unittest.TestCase):
         changed = rm.update_adaptive_state(28.0)
         self.assertTrue(changed)
         self.assertFalse(rm.is_throttled)  # Restored to nominal!
+
+    def test_adaptive_50_pct_cores_off(self):
+        """Verify Adaptive mode leaves 50% cores off, rounding up to 1 if below one."""
+        rm = ResourceManager(mode="Adaptive")
+        
+        # Test 1-core machine -> 50% is 0.5 -> round up to 1
+        rm.logical_cores = 1
+        threads, _ = rm.compute_allocation(mode="Adaptive")
+        self.assertEqual(threads, 1)
+
+        # Test 2-core machine -> 50% is 1.0 -> 1 thread used (50% off)
+        rm.logical_cores = 2
+        threads, _ = rm.compute_allocation(mode="Adaptive")
+        self.assertEqual(threads, 1)
+
+        # Test 4-core machine -> 50% is 2.0 -> 2 threads used (50% off)
+        rm.logical_cores = 4
+        threads, _ = rm.compute_allocation(mode="Adaptive")
+        self.assertEqual(threads, 2)
+
+        # Test 8-core machine -> 50% is 4.0 -> 4 threads used (50% off)
+        rm.logical_cores = 8
+        threads, _ = rm.compute_allocation(mode="Adaptive")
+        self.assertEqual(threads, 4)
+
+        # Test 16-core machine -> 50% is 8.0 -> 8 threads used (50% off)
+        rm.logical_cores = 16
+        threads, _ = rm.compute_allocation(mode="Adaptive")
+        self.assertEqual(threads, 8)
 
 if __name__ == "__main__":
     unittest.main()

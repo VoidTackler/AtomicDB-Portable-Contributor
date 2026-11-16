@@ -50,6 +50,64 @@ app.get('/api/download-usb-package', (_req: Request, res: Response) => {
   }
 });
 
+// Analytics and diagnostic metrics endpoint
+app.get('/api/analytics', (_req: Request, res: Response) => {
+  try {
+    const logsDir = path.resolve(__dirname, 'AtomicDBPortable', 'logs');
+    const analyticsFile = path.join(logsDir, 'analytics.json');
+    const lifetimeFile = path.join(logsDir, 'lifetime_statistics.txt');
+    const historyFile = path.join(logsDir, 'history.json');
+    const currentTaskFile = path.join(logsDir, 'current_task.log');
+    const sessionFile = path.join(logsDir, 'session_statistics.log');
+
+    let analyticsData: any = {};
+    if (fs.existsSync(analyticsFile)) {
+      try {
+        analyticsData = JSON.parse(fs.readFileSync(analyticsFile, 'utf-8'));
+      } catch (e) {}
+    }
+
+    let lifetimeReport = '';
+    if (fs.existsSync(lifetimeFile)) {
+      try {
+        lifetimeReport = fs.readFileSync(lifetimeFile, 'utf-8');
+      } catch (e) {}
+    }
+
+    let currentTaskLog = '';
+    if (fs.existsSync(currentTaskFile)) {
+      try {
+        currentTaskLog = fs.readFileSync(currentTaskFile, 'utf-8');
+      } catch (e) {}
+    }
+
+    let sessionLog = '';
+    if (fs.existsSync(sessionFile)) {
+      try {
+        sessionLog = fs.readFileSync(sessionFile, 'utf-8');
+      } catch (e) {}
+    }
+
+    let recentTasks: any[] = [];
+    if (fs.existsSync(historyFile)) {
+      try {
+        recentTasks = JSON.parse(fs.readFileSync(historyFile, 'utf-8'));
+      } catch (e) {}
+    }
+
+    res.json({
+      status: 'OK',
+      analytics: analyticsData,
+      lifetimeReport,
+      currentTaskLog,
+      sessionLog,
+      recentTasks: recentTasks.slice(-50),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // Guaranteed JSON handler for any other unhandled /api/* route (NEVER fallback to HTML)
 app.all('/api/*', (req: Request, res: Response) => {
   res.status(404).json({

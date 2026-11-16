@@ -27,6 +27,8 @@ class ResourceManager:
         self.hysteresis_target_cycles = 3
         self.cooldown_cycle_count = 0
         self.is_throttled = False
+        self.adaptive_check_interval = 20.0  # Updates much less often (every 20 seconds)
+        self.last_adaptive_check = 0.0
 
         # Hardware inventory
         self.physical_cores = os.cpu_count() or 4
@@ -119,29 +121,37 @@ class ResourceManager:
             hash_mb = min(max_hash, custom_hash or 1024)
 
         else: # "Adaptive" (Default)
-            # Normal adaptive operating point
-            if self.is_throttled:
-                # Stepped-down state during host load
-                threads = max(1, int(self.logical_cores * 0.25))
-                hash_mb = min(512, self._clamp_to_power_of_two(max(128, int(usable_ram_mb * 0.3))))
+            # Leave 50% of the computer's cores off (round up to 1 if below one)
+            active_cores = self.logical_cores * 0.5
+            if active_cores < 1.0:
+                threads = 1  # Round up to 1 if below one
             else:
-                # Nominal adaptive state
-                threads = max(1, int(self.logical_cores * 0.75))
-                if threads == self.logical_cores and self.logical_cores > 2:
-                    threads = self.logical_cores - 1
-                max_hash_possible = max(128, int(usable_ram_mb * 0.75) - self.RAM_PER_INSTANCE_OVERHEAD_MB)
-                hash_mb = self._clamp_to_power_of_two(min(2048, max_hash_possible))
+                threads = max(1, int(round(active_cores)))
+
+            if self.is_throttled:
+                # Stepped-down state during host load spike
+                threads = max(1, threads // 2)
+                hash_mb = min(512, self._clamp_to_power_of_two(max(128, int(usable_ram_mb * 0.25))))
+            else:
+                max_hash_possible = max(128, int(usable_ram_mb * 0.5) - self.RAM_PER_INSTANCE_OVERHEAD_MB)
+                hash_mb = self._clamp_to_power_of_two(min(1024, max_hash_possible))
 
         return threads, hash_mb
 
-    def update_adaptive_state(self, current_system_cpu_pct: float) -> bool:
+    def update_adaptive_state(self, current_system_cpu_pct: float, force: bool = False) -> bool:
         """
-        Executes hysteresis evaluation loop.
+        Executes hysteresis evaluation loop. Checked every 20 seconds.
         Returns True if allocation state changed (requires restart or throttle signal).
         """
         if self.mode != "Adaptive":
             return False
 
+        now = time.time()
+        if not force and getattr(self, "adaptive_check_interval", 20.0) > 0:
+            if now - getattr(self, "last_adaptive_check", 0.0) < getattr(self, "adaptive_check_interval", 20.0):
+                return False
+
+        self.last_adaptive_check = now
         state_changed = False
 
         if current_system_cpu_pct > self.system_cpu_threshold_pct:

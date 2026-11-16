@@ -98,6 +98,7 @@ def main():
             from PySide6.QtWidgets import QApplication
             from .gui import MainWindow
             app = QApplication(sys.argv)
+            app.setStyle("Fusion")
             window = MainWindow(config, resource_mgr, worker_mgr, engine_mgr, security, analytics_logger)
             window.show()
             sys.exit(app.exec())
