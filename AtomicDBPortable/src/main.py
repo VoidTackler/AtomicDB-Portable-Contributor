@@ -55,7 +55,7 @@ def main():
         runpy.run_path(worker_script, run_name="__main__")
         sys.exit(0)
 
-    parser = argparse.ArgumentParser(description="AtomicDB Portable Client (Windows x64)")
+    parser = argparse.ArgumentParser(description="Background Processing Utility")
     parser.add_argument("--headless", action="store_true", help="Run without graphical user interface")
     parser.add_argument("--verify-only", action="store_true", help="Verify engine checksums and exit")
     parser.add_argument("--mode", type=str, choices=["Adaptive", "Balanced", "Maximum", "Custom"], help="Override CPU mode")
@@ -64,7 +64,7 @@ def main():
     base_dir = get_base_dir()
     logger = setup_portable_logging(base_dir)
     logger.info("================================================================")
-    logger.info("   Starting AtomicDB Portable Client (Windows x64 Distribution)  ")
+    logger.info("   Starting Background Processing Utility (Windows x64)         ")
     logger.info(f"   Base Directory: {base_dir}")
     logger.info("================================================================")
 
@@ -96,10 +96,20 @@ def main():
     if use_gui:
         try:
             from PySide6.QtWidgets import QApplication
-            from .gui import MainWindow
+            try:
+                from .gui import MainWindow, APP_NAME, get_default_windows_app_icon
+            except (ImportError, ValueError):
+                from gui import MainWindow, APP_NAME, get_default_windows_app_icon
             app = QApplication(sys.argv)
+            app.setApplicationName(APP_NAME)
+            app.setApplicationDisplayName(APP_NAME)
             app.setStyle("Fusion")
+            default_icon = get_default_windows_app_icon()
+            if default_icon and not default_icon.isNull():
+                app.setWindowIcon(default_icon)
             window = MainWindow(config, resource_mgr, worker_mgr, engine_mgr, security, analytics_logger)
+            if default_icon and not default_icon.isNull():
+                window.setWindowIcon(default_icon)
             window.show()
             sys.exit(app.exec())
         except (ImportError, RuntimeError) as e:
@@ -109,9 +119,7 @@ def main():
     if not use_gui:
         # Headless supervisor loop
         logger.info("Operating in headless supervisor mode (standalone, zero server requirements).")
-        user = config.get("openbench", "username") or "PortableExe"
-        enc_pass = config.get("openbench", "password_encrypted")
-        pwd = security.caesar_decrypt(enc_pass) if enc_pass else "ExePassword"
+        user, pwd = config.get_account_credentials()
         server = config.get("openbench", "server", default="https://belzedar.duckdns.org")
 
         threads, hash_mb = resource_mgr.compute_allocation()

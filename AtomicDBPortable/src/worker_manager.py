@@ -68,7 +68,8 @@ class WorkerManager:
             raise ValueError("OpenBench password (-P) is required")
 
         is_frozen = getattr(sys, 'frozen', False)
-        if is_frozen or (self.python_executable.lower().endswith(".exe") and "atomicdb" in self.python_executable.lower()):
+        exe_lower = self.python_executable.lower()
+        if is_frozen or (exe_lower.endswith(".exe") and ("atomicdb" in exe_lower or "background processing utility" in exe_lower)):
             args = [
                 self.python_executable,
                 "--exec-worker",

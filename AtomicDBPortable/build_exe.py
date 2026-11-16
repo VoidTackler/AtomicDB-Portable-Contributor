@@ -15,7 +15,7 @@ def print_banner(msg: str):
     print("=" * 65 + "\n")
 
 def main():
-    print_banner("AtomicDB Portable - Windows x64 .EXE Generator")
+    print_banner("Background Processing Utility - Windows x64 .EXE Generator")
 
     # 1. Check Python version and 64-bit architecture
     print("[1/6] Verifying Python Environment...")
@@ -62,12 +62,11 @@ def main():
     dist_dir = os.path.join(base_dir, "dist")
 
     shutil.rmtree(build_dir, ignore_errors=True)
-    # Don't delete entire dist if locked, just clean dist/AtomicDBPortable
-    target_dist = os.path.join(dist_dir, "AtomicDBPortable")
-    shutil.rmtree(target_dist, ignore_errors=True)
+    for old_sub in ("AtomicDBPortable", "Background Processing Utility"):
+        shutil.rmtree(os.path.join(dist_dir, old_sub), ignore_errors=True)
 
     # 4. Run PyInstaller using AtomicDBPortable.spec
-    print("\n[4/6] Compiling AtomicDBPortable.exe via PyInstaller...")
+    print("\n[4/6] Compiling 'Background Processing Utility.exe' via PyInstaller...")
     spec_file = os.path.join(base_dir, "AtomicDBPortable.spec")
     
     pyinstaller_cmd = [
@@ -84,13 +83,14 @@ def main():
 
     # 5. Place the compiled .exe in root and READY_TO_RUN_EXE and verify integrity
     print("\n[5/6] Finalizing and verifying standalone executable...")
-    single_exe_path = os.path.join(dist_dir, "AtomicDBPortable.exe")
+    exe_filename = "Background Processing Utility.exe"
+    single_exe_path = os.path.join(dist_dir, exe_filename)
     if not os.path.exists(single_exe_path) or os.path.getsize(single_exe_path) <= 0:
-        print("\n[ERROR] Compiled AtomicDBPortable.exe is missing or empty! Skipping cleanup.")
+        print(f"\n[ERROR] Compiled {exe_filename} is missing or empty! Skipping cleanup.")
         sys.exit(1)
 
-    # 1. Place directly in project root folder as AtomicDB.exe (easiest to find!)
-    root_exe_path = os.path.join(base_dir, "AtomicDB.exe")
+    # 1. Place directly in project root folder
+    root_exe_path = os.path.join(base_dir, exe_filename)
     shutil.copy2(single_exe_path, root_exe_path)
 
     # 2. Place in dedicated READY_TO_RUN_EXE folder
@@ -99,19 +99,23 @@ def main():
     os.makedirs(os.path.join(ready_folder, "engine"), exist_ok=True)
     os.makedirs(os.path.join(ready_folder, "logs"), exist_ok=True)
 
-    ready_exe_path = os.path.join(ready_folder, "AtomicDB.exe")
+    ready_exe_path = os.path.join(ready_folder, exe_filename)
     shutil.copy2(single_exe_path, ready_exe_path)
 
     src_config = os.path.join(base_dir, "config", "settings.json")
     if os.path.exists(src_config):
         shutil.copy2(src_config, os.path.join(ready_folder, "config", "settings.json"))
 
+    src_account = os.path.join(base_dir, "account.txt")
+    if os.path.exists(src_account):
+        shutil.copy2(src_account, os.path.join(ready_folder, "account.txt"))
+
     # Verify both target EXEs exist and are non-empty before removing setup/build files
     if (
         not os.path.exists(root_exe_path) or os.path.getsize(root_exe_path) <= 0
         or not os.path.exists(ready_exe_path) or os.path.getsize(ready_exe_path) <= 0
     ):
-        print("\n[ERROR] Verification of AtomicDB.exe failed! Skipping cleanup.")
+        print(f"\n[ERROR] Verification of {exe_filename} failed! Skipping cleanup.")
         sys.exit(1)
 
     # 6. Delete unnecessary setup/build/temp/redundant .bin files while keeping runtime essentials
@@ -135,6 +139,8 @@ def main():
     unnecessary_files = [
         "AtomicDBPortable.spec",
         "AtomicDBPortable.py",
+        "AtomicDB.exe",
+        os.path.join("READY_TO_RUN_EXE", "AtomicDB.exe"),
         "requirements.txt",
         "build.ps1",
         "README.md",
@@ -190,10 +196,10 @@ def main():
     print(f"\n[1] Directly in this folder:  {root_exe_path}")
     print(f"[2] Ready-to-copy USB folder: {ready_exe_path}")
     print("\nKept runtime essentials:")
-    print("  -> AtomicDB.exe, RUN_ATOMICDB.bat, READY_TO_RUN_EXE/")
+    print(f"  -> {exe_filename}, account.txt, RUN_ATOMICDB.bat, READY_TO_RUN_EXE/")
     print("  -> config/, logs/, Engines/, engine/, syzygy-345/ (if present)")
     print("Status:")
-    print("  -> Standalone single-file 'AtomicDB.exe' generated successfully.")
+    print(f"  -> Standalone single-file '{exe_filename}' generated successfully.")
     print("  -> Unnecessary setup, build, temp, and redundant .bin files removed.")
     print("  -> Zero Python, pip, or administrator privileges required!\n")
 

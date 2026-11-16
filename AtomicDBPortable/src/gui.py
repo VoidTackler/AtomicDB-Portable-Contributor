@@ -8,10 +8,18 @@ permanent lifetime statistics, and interactive real-time time-series graphs.
 import sys
 import os
 import time
+import ctypes
 import logging
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger("AtomicDB.GUI")
+
+APP_NAME = "Background Processing Utility"
+IDI_APPLICATION = 32512  # Win32 MAKEINTRESOURCE(32512)
+
+def make_int_resource(resource_id: int) -> ctypes.c_void_p:
+    """Equivalent to Win32 MAKEINTRESOURCE(id)."""
+    return ctypes.c_void_p(int(resource_id) & 0xFFFF)
 
 # PySide6 imports with graceful headless fallback
 try:
@@ -20,13 +28,40 @@ try:
         QGridLayout, QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
         QCheckBox, QProgressBar, QTextEdit, QGroupBox, QLineEdit, QTabWidget,
         QScrollArea, QSystemTrayIcon, QMenu, QMessageBox, QTableWidget,
-        QTableWidgetItem, QHeaderView, QSplitter, QFrame, QSizePolicy, QSlider
+        QTableWidgetItem, QHeaderView, QSplitter, QFrame, QSizePolicy, QSlider, QStyle
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPointF, QRectF
-    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QBrush, QPolygonF
+    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QBrush, QPolygonF, QImage, QPixmap
     HAS_QT = True
 except ImportError:
     HAS_QT = False
+
+def get_default_windows_app_icon():
+    """
+    Returns the default Windows application icon:
+    IDI_APPLICATION = MAKEINTRESOURCE(32512).
+    """
+    if not HAS_QT:
+        return None
+    if sys.platform == "win32":
+        try:
+            user32 = ctypes.windll.user32
+            user32.LoadIconW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            user32.LoadIconW.restype = ctypes.c_void_p
+            hicon = user32.LoadIconW(None, make_int_resource(IDI_APPLICATION))
+            if hicon:
+                img = QImage.fromHICON(int(hicon))
+                if not img.isNull():
+                    return QIcon(QPixmap.fromImage(img))
+        except Exception as exc:
+            logger.debug(f"Could not load Win32 IDI_APPLICATION (32512): {exc}")
+    try:
+        style = QApplication.style()
+        if style is not None:
+            return style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+    except Exception:
+        pass
+    return QIcon()
 
 try:
     from .configuration import PortableConfig
@@ -352,7 +387,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.analytics_logger.add_listener(lambda summary: self.signals.analytics_updated.emit(summary))
         self.signals.analytics_updated.connect(self._update_analytics_ui)
 
-        self.setWindowTitle("AtomicDB Portable — Windows x64 Computing Client")
+        self.setWindowTitle(APP_NAME)
+        default_icon = get_default_windows_app_icon()
+        if default_icon and not default_icon.isNull():
+            self.setWindowIcon(default_icon)
         self.setMinimumSize(700, 480)
         self.resize(1020, 840)
 
@@ -627,7 +665,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         # Header bar
         header = QHBoxLayout()
-        title_label = QLabel("ATOMICDB DISTRIBUTED CLIENT (USB PORTABLE)")
+        title_label = QLabel("BACKGROUND PROCESSING UTILITY")
         title_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #f8fafc; letter-spacing: 0.5px;")
         header.addWidget(title_label)
 
@@ -1269,9 +1307,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
             self.btn_stop.setEnabled(False)
 
     def _start_worker(self):
-        user = "PortableExe"
-        stored_enc = self.config.get("openbench", "password_encrypted", default="")
-        pwd = self.security.caesar_decrypt(stored_enc) if stored_enc else "ExePassword"
+        user, pwd = self.config.get_account_credentials()
         server_url = "https://belzedar.duckdns.org"
 
         threads = self.spin_threads.value()

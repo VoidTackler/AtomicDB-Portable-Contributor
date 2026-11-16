@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   AtomicDB Portable - Windows x64 Build System          " -ForegroundColor Cyan
+Write-Host "   Background Processing Utility - x64 Build System       " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # 1. Environment Verification
@@ -63,25 +63,29 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # 6. Assemble Standalone Single-File .EXE & Cleanup Excess Files
-Write-Host "[6/6] Finalizing standalone AtomicDB.exe and cleaning excess build files..." -ForegroundColor Yellow
-$singleExe = "dist/AtomicDBPortable.exe"
+Write-Host "[6/6] Finalizing standalone Background Processing Utility.exe and cleaning excess build files..." -ForegroundColor Yellow
+$exeName = "Background Processing Utility.exe"
+$singleExe = "dist/$exeName"
 if (-not (Test-Path $singleExe) -or ((Get-Item $singleExe).Length -le 0)) {
-    Write-Error "Compiled AtomicDBPortable.exe is missing or empty! Skipping cleanup."
+    Write-Error "Compiled $exeName is missing or empty! Skipping cleanup."
     exit 1
 }
 
-Copy-Item $singleExe "AtomicDB.exe" -Force
+Copy-Item $singleExe $exeName -Force
 New-Item -ItemType Directory -Force -Path "READY_TO_RUN_EXE" | Out-Null
 New-Item -ItemType Directory -Force -Path "READY_TO_RUN_EXE/config" | Out-Null
 New-Item -ItemType Directory -Force -Path "READY_TO_RUN_EXE/engine" | Out-Null
 New-Item -ItemType Directory -Force -Path "READY_TO_RUN_EXE/logs" | Out-Null
-Copy-Item $singleExe "READY_TO_RUN_EXE/AtomicDB.exe" -Force
+Copy-Item $singleExe "READY_TO_RUN_EXE/$exeName" -Force
 if (Test-Path "config/settings.json") {
     Copy-Item "config/settings.json" "READY_TO_RUN_EXE/config/settings.json" -Force
 }
+if (Test-Path "account.txt") {
+    Copy-Item "account.txt" "READY_TO_RUN_EXE/account.txt" -Force
+}
 
-if (-not (Test-Path "AtomicDB.exe") -or ((Get-Item "AtomicDB.exe").Length -le 0)) {
-    Write-Error "Target AtomicDB.exe verification failed! Skipping cleanup."
+if (-not (Test-Path $exeName) -or ((Get-Item $exeName).Length -le 0)) {
+    Write-Error "Target $exeName verification failed! Skipping cleanup."
     exit 1
 }
 
@@ -94,6 +98,8 @@ foreach ($d in $unnecessaryDirs) {
 $unnecessaryFiles = @(
     "AtomicDBPortable.spec",
     "AtomicDBPortable.py",
+    "AtomicDB.exe",
+    "READY_TO_RUN_EXE/AtomicDB.exe",
     "requirements.txt",
     "build.bat",
     "build_exe.py",
@@ -110,9 +116,9 @@ Get-ChildItem -Path . -Recurse -Include "__pycache__", ".pytest_cache" | Remove-
 Get-ChildItem -Path . -Recurse -Include "*.pyc", "*.pyo", "*.tmp", "*.part", "*.bak", "*.old", "*.bin" | Remove-Item -Force -ErrorAction SilentlyContinue
 
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "   BUILD COMPLETE: Standalone Single-File AtomicDB.exe!   " -ForegroundColor Green
-Write-Host "   Location: AtomicDB.exe (and READY_TO_RUN_EXE/)         " -ForegroundColor Green
+Write-Host "   BUILD COMPLETE: Background Processing Utility.exe!     " -ForegroundColor Green
+Write-Host "   Location: Background Processing Utility.exe             " -ForegroundColor Green
 Write-Host "   Unnecessary setup/build/temp/.bin files cleaned up.    " -ForegroundColor Green
-Write-Host "   Copy AtomicDB.exe to your USB stick and run directly.  " -ForegroundColor Green
+Write-Host "   Copy executable & account.txt to USB and run directly. " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
 

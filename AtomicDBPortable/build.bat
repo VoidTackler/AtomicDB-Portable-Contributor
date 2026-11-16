@@ -1,7 +1,7 @@
 @echo off
-title AtomicDB Portable - Windows x64 Builder
+title Background Processing Utility - Windows x64 Builder
 echo ===================================================================
-echo    AtomicDB Portable - 1-Click Windows x64 .EXE Generator
+echo    Background Processing Utility - 1-Click .EXE Generator
 echo ===================================================================
 echo.
 
@@ -40,9 +40,9 @@ if %BUILD_ERR% neq 0 (
     exit /b %BUILD_ERR%
 )
 
-if not exist "AtomicDB.exe" (
+if not exist "Background Processing Utility.exe" (
     echo.
-    echo [ERROR] AtomicDB.exe was not found after build. Skipping cleanup.
+    echo [ERROR] Background Processing Utility.exe was not found after build. Skipping cleanup.
     echo.
     pause
     exit /b 1
@@ -58,10 +58,10 @@ if exist "worker" rd /s /q "worker" >nul 2>&1
 if exist "tests" rd /s /q "tests" >nul 2>&1
 for /d /r . %%d in (__pycache__) do @if exist "%%d" rd /s /q "%%d" >nul 2>&1
 del /s /q *.pyc *.pyo *.tmp *.part *.bak *.old *.bin >nul 2>&1
-for %%f in (AtomicDBPortable.spec AtomicDBPortable.py requirements.txt build.ps1 build_exe.py README.md download_dependencies.py download_dependencies.bat READY_TO_RUN_EXE\download_dependencies.bat) do @if exist "%%f" del /q "%%f" >nul 2>&1
+for %%f in (AtomicDBPortable.spec AtomicDBPortable.py AtomicDB.exe READY_TO_RUN_EXE\AtomicDB.exe requirements.txt build.ps1 build_exe.py README.md download_dependencies.py download_dependencies.bat READY_TO_RUN_EXE\download_dependencies.bat) do @if exist "%%f" del /q "%%f" >nul 2>&1
 
 echo.
-echo [SUCCESS] Standalone single file AtomicDB.exe ready! Unnecessary setup/build/temp/.bin files removed.
+echo [SUCCESS] Standalone single file Background Processing Utility.exe ready! Unnecessary setup/build/temp/.bin files removed.
 echo.
 pause
 :: Remove build.bat itself once the build is complete

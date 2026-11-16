@@ -284,9 +284,11 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         self.assertIn("getsize(single_exe_path) <= 0", build_py)
         self.assertIn('".bin"', build_py)
         self.assertIn('BUILD_ERR=%errorlevel%', build_bat)
-        self.assertIn('not exist "AtomicDB.exe"', build_bat)
+        self.assertIn('not exist "Background Processing Utility.exe"', build_bat)
         self.assertIn('*.bin', build_bat)
         self.assertIn('*.bin', build_ps1)
+        self.assertIn('account.txt', build_py)
+        self.assertIn('account.txt', build_ps1)
         # Ensure runtime directories are NOT listed for deletion
         for required_runtime in ('"logs"', '"config"', '"syzygy-345"'):
             self.assertNotIn(required_runtime, build_py.split("unnecessary_dirs")[1].split("]")[0])
@@ -362,6 +364,62 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         self.assertIn('"10 mins", 600', gui_src)
         self.assertIn("self.btn_start.setMinimumHeight(40)", gui_src)
         self.assertIn("self.btn_start.setStyleSheet", gui_src)
+
+    def test_account_txt_credentials_defaults_and_overrides(self):
+        from AtomicDBPortable.src.configuration import PortableConfig
+
+        old_root = os.environ.get("ATOMICDB_PORTABLE_ROOT")
+        os.environ["ATOMICDB_PORTABLE_ROOT"] = self.test_dir
+        try:
+            cfg = PortableConfig()
+            acc_path = os.path.join(self.test_dir, "account.txt")
+            self.assertTrue(os.path.exists(acc_path))
+
+            # Blank variables default to PortableExe / ExePassword
+            self.assertEqual(cfg.get_account_credentials(), ("PortableExe", "ExePassword"))
+
+            # Override both USERNAME and PASSWORD
+            with open(acc_path, "w", encoding="utf-8") as f:
+                f.write("# Custom account\nUSERNAME=CustomUser\nPASSWORD=CustomPass123\n")
+            self.assertEqual(cfg.get_account_credentials(), ("CustomUser", "CustomPass123"))
+
+            # Partial override: custom username with blank password
+            with open(acc_path, "w", encoding="utf-8") as f:
+                f.write('USERNAME="QuotedUser"\nPASSWORD=\n')
+            self.assertEqual(cfg.get_account_credentials(), ("QuotedUser", "ExePassword"))
+
+            # Partial override: blank username with custom password
+            with open(acc_path, "w", encoding="utf-8") as f:
+                f.write("USERNAME=\nPASSWORD=OnlyPass\n")
+            self.assertEqual(cfg.get_account_credentials(), ("PortableExe", "OnlyPass"))
+        finally:
+            if old_root is None:
+                os.environ.pop("ATOMICDB_PORTABLE_ROOT", None)
+            else:
+                os.environ["ATOMICDB_PORTABLE_ROOT"] = old_root
+
+    def test_application_name_and_default_win32_icon_config(self):
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root_dir, "src", "gui.py"), "r", encoding="utf-8") as f:
+            gui_src = f.read()
+        with open(os.path.join(root_dir, "src", "main.py"), "r", encoding="utf-8") as f:
+            main_src = f.read()
+        with open(os.path.join(root_dir, "AtomicDBPortable.spec"), "r", encoding="utf-8") as f:
+            spec_src = f.read()
+
+        self.assertIn('APP_NAME = "Background Processing Utility"', gui_src)
+        self.assertIn("IDI_APPLICATION = 32512", gui_src)
+        self.assertIn("make_int_resource(IDI_APPLICATION)", gui_src)
+        self.assertIn("LoadIconW", gui_src)
+        self.assertIn("self.config.get_account_credentials()", gui_src)
+
+        self.assertIn("app.setApplicationName(APP_NAME)", main_src)
+        self.assertIn("app.setApplicationDisplayName(APP_NAME)", main_src)
+        self.assertIn("app.setWindowIcon(default_icon)", main_src)
+        self.assertIn("config.get_account_credentials()", main_src)
+
+        self.assertIn("name='Background Processing Utility'", spec_src)
+        self.assertIn("icon='NONE'", spec_src)
 
 
 if __name__ == "__main__":

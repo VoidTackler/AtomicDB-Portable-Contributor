@@ -1,13 +1,15 @@
 ===================================================================
-   AtomicDB Portable — Ready-to-Run USB Folder
+   Background Processing Utility — Ready-to-Run USB Folder
 ===================================================================
 
 This folder is completely self-contained and ready to copy to a USB drive.
 
 HOW TO USE:
-1. Double-click "AtomicDB.exe" or "START_HERE.bat".
+1. Double-click "Background Processing Utility.exe" or "START_HERE.bat".
 2. The application will start immediately.
-3. Select your CPU mode or thread count and click "Start Contributing".
+3. Select your CPU mode or thread count and click "Start Worker".
+4. Optional account attribution: edit "account.txt" in this folder and set
+   USERNAME=... and PASSWORD=... (leave blank for PortableExe / ExePassword).
 
 NOTES:
 - Zero installation or administrator privileges required.

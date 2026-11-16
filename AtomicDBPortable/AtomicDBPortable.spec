@@ -62,7 +62,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='AtomicDBPortable',
+    name='Background Processing Utility',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -75,6 +75,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='NONE',             # Use Windows default application icon: IDI_APPLICATION (MAKEINTRESOURCE(32512))
     uac_admin=False,         # Zero Administrator Privileges (runs asInvoker)
     uac_uiaccess=False,
 )
