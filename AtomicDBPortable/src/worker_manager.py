@@ -30,6 +30,9 @@ class WorkerManager:
         self._reader_thread: Optional[threading.Thread] = None
         self.consecutive_crashes = 0
         self.last_crash_time = 0.0
+        self.is_paused = False
+        self.stop_after_current_task = False
+        self.stop_after_task_file: Optional[str] = None
 
     def set_analytics_logger(self, analytics_logger):
         self.analytics_logger = analytics_logger
@@ -140,6 +143,10 @@ class WorkerManager:
             logger.warning("Worker is already running.")
             return True
 
+        self.is_paused = False
+        if self.analytics_logger:
+            self.analytics_logger.reset_current_task()
+
         if not os.path.exists(self.worker_script_path):
             if hasattr(sys, '_MEIPASS'):
                 meipass_worker = os.path.join(sys._MEIPASS, "worker", "atomicdb_worker.py")
@@ -187,6 +194,16 @@ class WorkerManager:
         os.makedirs(portable_temp, exist_ok=True)
         child_env["TEMP"] = portable_temp
         child_env["TMP"] = portable_temp
+
+        stop_flag_path = os.path.join(portable_temp, "stop_after_task.flag")
+        try:
+            if os.path.exists(stop_flag_path):
+                os.remove(stop_flag_path)
+        except Exception:
+            pass
+        self.stop_after_task_file = stop_flag_path
+        self.stop_after_current_task = False
+        child_env["ATOMICDB_STOP_AFTER_TASK_FILE"] = stop_flag_path
 
         try:
             # On Windows, use CREATE_NEW_PROCESS_GROUP for clean signals
@@ -250,9 +267,78 @@ class WorkerManager:
             finally:
                 self.is_running = False
                 self.current_pid = None
+                self.is_paused = False
+                self.stop_after_current_task = False
+                if self.analytics_logger and self.analytics_logger.current_task_id:
+                    self.analytics_logger.reset_current_task()
 
         self._reader_thread = threading.Thread(target=reader, daemon=True)
         self._reader_thread.start()
+
+    def pause_worker(self) -> bool:
+        """Suspends the worker process tree and pauses active task ETA countdown."""
+        if not self.is_running or not self.process or self.process.poll() is not None:
+            return False
+        try:
+            import psutil
+            proc = psutil.Process(self.process.pid)
+            for child in proc.children(recursive=True):
+                try:
+                    child.suspend()
+                except Exception:
+                    pass
+            proc.suspend()
+            self.is_paused = True
+            if self.analytics_logger:
+                self.analytics_logger.pause_current_task()
+            self._broadcast_log("[SUPERVISOR] Worker paused; ETA countdown paused.")
+            return True
+        except Exception as e:
+            logger.debug(f"Could not pause worker process: {e}")
+            return False
+
+    def resume_worker(self) -> bool:
+        """Resumes a paused worker process tree and resumes active task ETA countdown."""
+        if not self.is_running or not self.process or self.process.poll() is not None:
+            return False
+        try:
+            import psutil
+            proc = psutil.Process(self.process.pid)
+            proc.resume()
+            for child in proc.children(recursive=True):
+                try:
+                    child.resume()
+                except Exception:
+                    pass
+            self.is_paused = False
+            if self.analytics_logger:
+                self.analytics_logger.resume_current_task()
+            self._broadcast_log("[SUPERVISOR] Worker resumed; ETA countdown resumed.")
+            return True
+        except Exception as e:
+            logger.debug(f"Could not resume worker process: {e}")
+            return False
+
+    def request_stop_after_current_task(self) -> bool:
+        """Signals the worker to finish and submit the active task, then exit cleanly."""
+        if not self.is_running or not self.process or self.process.poll() is not None:
+            return False
+
+        self.stop_after_current_task = True
+        if self.stop_after_task_file:
+            try:
+                parent_dir = os.path.dirname(self.stop_after_task_file)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
+                with open(self.stop_after_task_file, "w", encoding="utf-8") as f:
+                    f.write("stop_after_current_task\n")
+            except Exception as e:
+                logger.error(f"Failed to write stop-after-task flag: {e}")
+
+        self._broadcast_log(
+            "[SUPERVISOR] Stop scheduled: finishing current task cleanly before stopping..."
+        )
+        return True
 
     def _broadcast_log(self, text: str):
         if self.analytics_logger:
@@ -280,12 +366,18 @@ class WorkerManager:
         if not self.process or self.process.poll() is not None:
             self.is_running = False
             self.current_pid = None
+            self.is_paused = False
+            self.stop_after_current_task = False
+            if self.analytics_logger:
+                self.analytics_logger.reset_current_task()
             return True
 
         logger.info(f"Stopping worker PID {self.process.pid} gracefully...")
         self._broadcast_log("[SUPERVISOR] Sending graceful shutdown signal...")
 
         try:
+            if self.is_paused:
+                self.resume_worker()
             if sys.platform == "win32":
                 # Send CTRL_BREAK_EVENT to the process group
                 self.process.send_signal(signal.CTRL_BREAK_EVENT)
@@ -311,6 +403,15 @@ class WorkerManager:
 
         self.is_running = False
         self.current_pid = None
+        self.is_paused = False
+        self.stop_after_current_task = False
+        if self.stop_after_task_file and os.path.exists(self.stop_after_task_file):
+            try:
+                os.remove(self.stop_after_task_file)
+            except Exception:
+                pass
+        if self.analytics_logger:
+            self.analytics_logger.reset_current_task()
         return True
 
     def check_health(self) -> Dict[str, Any]:

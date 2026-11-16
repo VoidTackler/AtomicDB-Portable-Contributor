@@ -258,16 +258,21 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         with open(gui_path, "r", encoding="utf-8") as f:
             gui_src = f.read()
 
-        # Verify explicit high-contrast styling for Start/Pause/Emergency buttons and disabled states
+        # Verify explicit high-contrast styling for Start / Stop After Finishing Current Task / Save and Stop buttons
         self.assertIn("QPushButton#btnStart", gui_src)
         self.assertIn("QPushButton#btnStart:disabled", gui_src)
         self.assertIn("QPushButton#btnStop", gui_src)
         self.assertIn("QPushButton#btnStop:disabled", gui_src)
-        self.assertIn("QPushButton#btnLocalStop:checked", gui_src)
+        self.assertIn("QPushButton#btnLocalStop", gui_src)
+        self.assertIn("QPushButton#btnLocalStop:disabled", gui_src)
+        self.assertIn('QPushButton("Start")', gui_src)
+        self.assertIn('QPushButton("Stop After Finishing Current Task")', gui_src)
+        self.assertIn('QPushButton("Save and Stop")', gui_src)
         # Ensure unscoped controlsContainer stylesheet does not override buttons
         self.assertIn("QWidget#controlsContainer {", gui_src)
-        # Ensure dedicated 1000ms timer for ETA countdown & uptime alongside 800ms telemetry timer
+        # Ensure dedicated 1000ms PreciseTimer for ETA countdown & uptime alongside 800ms telemetry timer
         self.assertIn("self.timer.start(800)", gui_src)
+        self.assertIn("self.eta_timer.setTimerType(Qt.PreciseTimer)", gui_src)
         self.assertIn("self.eta_timer.start(1000)", gui_src)
         self.assertIn("_refresh_eta_1s", gui_src)
 
@@ -362,7 +367,9 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         self.assertIn('"1.5 mins", 90', gui_src)
         self.assertIn('"5 mins", 300', gui_src)
         self.assertIn('"10 mins", 600', gui_src)
-        self.assertIn("self.btn_start.setMinimumHeight(40)", gui_src)
+        self.assertIn("self.btn_start.setMinimumHeight(30)", gui_src)
+        self.assertIn("self.btn_stop.setMinimumHeight(30)", gui_src)
+        self.assertIn("self.btn_local_stop.setMinimumHeight(30)", gui_src)
         self.assertIn("self.btn_start.setStyleSheet", gui_src)
 
     def test_account_txt_credentials_defaults_and_overrides(self):
@@ -420,6 +427,67 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
 
         self.assertIn("name='Background Processing Utility'", spec_src)
         self.assertIn("icon='NONE'", spec_src)
+
+    def test_eta_pauses_when_paused_and_resets_when_reset_or_stopped(self):
+        from unittest.mock import patch
+
+        fake_now = [1000.0]
+        with patch("AtomicDBPortable.src.analytics_logger.time.time", side_effect=lambda: fake_now[0]):
+            # Establish baseline 2,000,000 NPS
+            self.logger.parse_worker_line("[0] task 1 (2000000n, 1.00s) -> cp 10")
+            self.logger.parse_worker_line("[0] starting task 9001 (10000000n) calculating: e2e4")
+
+            self.assertEqual(self.logger.current_task_initial_eta_seconds, 5)
+            fake_now[0] += 2.0  # 2s elapsed -> ETA = 3s
+            self.assertEqual(self.logger.calculate_estimated_time_remaining(), 3)
+
+            # Pause worker at t=1002 -> advance wall clock by 10s -> ETA stays frozen at 3s
+            self.logger.pause_current_task()
+            self.assertTrue(self.logger.is_worker_paused)
+            fake_now[0] += 10.0
+            self.assertEqual(self.logger.calculate_estimated_time_remaining(), 3)
+
+            # Resume worker at t=1012 -> still 3s immediately, then ticks down 1s/s to 2s, 1s, 0s, -1s
+            self.logger.resume_current_task()
+            self.assertFalse(self.logger.is_worker_paused)
+            self.assertEqual(self.logger.calculate_estimated_time_remaining(), 3)
+            fake_now[0] += 1.0
+            self.assertEqual(self.logger.calculate_estimated_time_remaining(), 2)
+            fake_now[0] += 3.0
+            self.assertEqual(self.logger.calculate_estimated_time_remaining(), -1)
+
+            # Reset when worker stops / interrupted / reset_current_task called
+            self.logger.parse_worker_line("[0] task 9001 interrupted by the stop")
+            summary = self.logger.get_summary()
+            self.assertIsNone(summary["current_task_id"])
+            self.assertIsNone(summary["current_task_eta_seconds"])
+            self.assertEqual(summary["current_task_eta_str"], "-")
+
+    def test_stop_after_finishing_current_task_sentinel_and_worker_hooks(self):
+        from AtomicDBPortable.worker.atomicdb_worker import _is_stop_after_task_requested
+
+        flag_file = os.path.join(self.test_dir, "stop_after_task.flag")
+        old_env = os.environ.get("ATOMICDB_STOP_AFTER_TASK_FILE")
+        os.environ["ATOMICDB_STOP_AFTER_TASK_FILE"] = flag_file
+        try:
+            self.assertFalse(_is_stop_after_task_requested())
+            with open(flag_file, "w", encoding="utf-8") as f:
+                f.write("stop_after_current_task\n")
+            self.assertTrue(_is_stop_after_task_requested())
+        finally:
+            if old_env is None:
+                os.environ.pop("ATOMICDB_STOP_AFTER_TASK_FILE", None)
+            else:
+                os.environ["ATOMICDB_STOP_AFTER_TASK_FILE"] = old_env
+
+        # Verify WorkerManager has request_stop_after_current_task and resets ETA on stop
+        self.logger.parse_worker_line("[0] task 1 (2000000n, 1.00s) -> cp 10")
+        self.logger.parse_worker_line("[0] starting task 9002 (6000000n) calculating: e2e4")
+        wm = WorkerManager("python", "worker/atomicdb_worker.py", analytics_logger=self.logger)
+        self.assertFalse(wm.request_stop_after_current_task())
+        wm.stop_worker()
+        self.assertIsNone(self.logger.current_task_id)
+        self.assertIsNone(self.logger.calculate_estimated_time_remaining())
 
 
 if __name__ == "__main__":

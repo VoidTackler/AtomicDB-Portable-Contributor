@@ -101,6 +101,9 @@ class AnalyticsLogger:
         self.current_task_start_time: Optional[float] = None
         self.current_task_initial_eta_seconds: Optional[float] = None
         self.current_task_eta_seconds: Optional[float] = None
+        self.is_worker_paused: bool = False
+        self.current_task_paused_at: Optional[float] = None
+        self.current_task_paused_duration: float = 0.0
 
         # Time-series graph data for current session (capped in memory)
         self.cpu_history: List[Dict[str, Any]] = []
@@ -211,13 +214,55 @@ class AnalyticsLogger:
         """
         The average time remaining is based on the last three tasks, not last three lines or calculations.
         Calculated before each task (rounded to whole seconds), reduces by 1 second steps,
+        pauses when the worker is paused, resets when the worker is reset,
         and can go into negative integers when overdue.
         """
         if not self.current_task_id or self.current_task_initial_eta_seconds is None or self.current_task_start_time is None:
             return None
-        elapsed_sec = int(round(max(0.0, time.time() - self.current_task_start_time)))
+        ref_now = (
+            self.current_task_paused_at
+            if (self.is_worker_paused and self.current_task_paused_at is not None)
+            else time.time()
+        )
+        elapsed_float = max(0.0, ref_now - self.current_task_start_time - self.current_task_paused_duration)
+        elapsed_sec = int(round(elapsed_float))
         remaining = int(self.current_task_initial_eta_seconds) - elapsed_sec
         return remaining
+
+    def pause_current_task(self):
+        """Pauses the active task ETA countdown at its exact current value."""
+        if not self.is_worker_paused:
+            self.is_worker_paused = True
+            self.current_task_paused_at = time.time()
+            self.current_task_eta_seconds = self.calculate_estimated_time_remaining()
+            self.write_current_task_log()
+            self._notify_listeners()
+
+    def resume_current_task(self):
+        """Resumes the active task ETA countdown, excluding paused duration."""
+        if self.is_worker_paused:
+            if self.current_task_paused_at is not None:
+                self.current_task_paused_duration += max(0.0, time.time() - self.current_task_paused_at)
+            self.current_task_paused_at = None
+            self.is_worker_paused = False
+            self.current_task_eta_seconds = self.calculate_estimated_time_remaining()
+            self.write_current_task_log()
+            self._notify_listeners()
+
+    def reset_current_task(self):
+        """Resets active task state and Estimated Time Remaining when the worker stops or resets."""
+        self.current_task_id = None
+        self.current_task_nodes = 0
+        self.current_task_nodes_done = 0
+        self.current_task_line = "Idle (waiting for next task)"
+        self.current_task_initial_eta_seconds = None
+        self.current_task_eta_seconds = None
+        self.current_task_start_time = None
+        self.is_worker_paused = False
+        self.current_task_paused_at = None
+        self.current_task_paused_duration = 0.0
+        self.write_current_task_log()
+        self._notify_listeners()
 
     @staticmethod
     def format_eta_str(eta: Optional[float]) -> str:
@@ -440,6 +485,9 @@ class AnalyticsLogger:
         self.current_task_nodes_done = 0
         self.current_task_line = str(line_info).strip()
         self.current_task_start_time = time.time()
+        self.is_worker_paused = False
+        self.current_task_paused_at = None
+        self.current_task_paused_duration = 0.0
 
         # ETA is calculated before each task based on last 3 tasks (rounded to whole seconds)
         avg_3 = self.get_last_3_avg_nps()
@@ -571,6 +619,9 @@ class AnalyticsLogger:
         self.current_task_initial_eta_seconds = None
         self.current_task_eta_seconds = None
         self.current_task_start_time = None
+        self.is_worker_paused = False
+        self.current_task_paused_at = None
+        self.current_task_paused_duration = 0.0
 
         # Append to human-readable activity.log on USB (including Device name after each task)
         try:
@@ -698,7 +749,17 @@ class AnalyticsLogger:
         # 5. Worker process crash
         m5 = self._re_process_err.search(clean)
         if m5:
+            self.reset_current_task()
             self.record_crash("WORKER_EXIT_ERROR", f"Exit code {m5.group(1)}")
+            return
+
+        # 5b. Clean worker stop / task interruption resets current task ETA
+        if (
+            "interrupted by the stop" in clean
+            or "[SUPERVISOR] Process ended cleanly" in clean
+            or "[SUPERVISOR] Worker process terminated cleanly" in clean
+        ):
+            self.reset_current_task()
             return
 
         # 6. Syzygy download status logging
@@ -719,6 +780,7 @@ class AnalyticsLogger:
         return {
             **self.analytics_data,
             "device_name": self.device_name,
+            "is_worker_paused": self.is_worker_paused,
             # Session statistics
             "session_tasks_completed": self.session_tasks_completed,
             "session_total_nodes": self.session_total_nodes,

@@ -2470,8 +2470,30 @@ def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
         except Exception as exc:  # the thread must survive anything
             print(f'solve loop error: {exc}', flush=True)
             lease_session = secrets.token_urlsafe(24)
+        if _is_stop_after_task_requested():
+            stop_event.set()
+            break
         if not did:
-            stop_event.wait(60)
+            _wait_stop_or_drain(stop_event, 60)
+
+
+def _is_stop_after_task_requested():
+    flag_path = os.environ.get('ATOMICDB_STOP_AFTER_TASK_FILE', '')
+    return bool(flag_path and os.path.exists(flag_path))
+
+
+def _wait_stop_or_drain(stop_event, seconds):
+    deadline = time.monotonic() + float(seconds)
+    while not stop_event.is_set():
+        if _is_stop_after_task_requested():
+            stop_event.set()
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if stop_event.wait(min(0.5, remaining)):
+            return True
+    return True
 
 
 def probe_tb(tb, fen):
@@ -2557,6 +2579,9 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     lease_failures = 0
 
     while not stop.is_set():
+        if _is_stop_after_task_requested():
+            stop.set()
+            break
         # Only one slot drives the self-update, and it does so between batches
         # exactly as before.  A successful update re-execs the process, which
         # ends every slot at once -- their leases then expire and are recycled,
@@ -2594,7 +2619,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                         LEASE_RETRY_MAX_SECONDS)
             print(f'[{slot}] lease response error: {e}; retrying in {delay}s',
                   flush=True)
-            if stop.wait(delay):
+            if _wait_stop_or_drain(stop, delay):
                 break
             continue
         lease_failures = 0
@@ -2603,7 +2628,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             print(f'[{slot}] no tasks available; waiting 60s', flush=True)
             if a.once:
                 break
-            if stop.wait(60):
+            if _wait_stop_or_drain(stop, 60):
                 break
             continue
         if held is not None:
@@ -2611,7 +2636,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             # over, so this replaces whatever the slot held before.
             held.hold('analysis', machine, tasks)
         for t in tasks:
-            if stop.is_set():
+            if stop.is_set() or _is_stop_after_task_requested():
+                stop.set()
                 break          # still held: the stop hands it back
             current_task.start(t['id'], t.get('lease_token', ''))
             print(f"[{slot}] starting task {t['id']} ({t.get('budget_nodes', 0)}n) calculating: {t['fen']}", flush=True)
@@ -2635,6 +2661,10 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 except Exception as e:
                     print(f'[{slot}] tb submit error: {e}', flush=True)
                 current_task.clear()
+                if _is_stop_after_task_requested():
+                    print(f"[{slot}] stopping cleanly after finishing task {t['id']}.", flush=True)
+                    stop.set()
+                    break
                 continue
             try:
                 lines = eng.analyse(
@@ -2733,7 +2763,11 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             print(f"[{slot}] task {t['id']} ({t['budget_nodes']}n, "
                   f"{time.time()-t0:.1f}s) -> {s}", flush=True)
             current_task.clear()
-        if a.once:
+            if _is_stop_after_task_requested():
+                print(f"[{slot}] stopping cleanly after finishing task {t['id']}.", flush=True)
+                stop.set()
+                break
+        if a.once or stop.is_set():
             break
     eng.close()
 

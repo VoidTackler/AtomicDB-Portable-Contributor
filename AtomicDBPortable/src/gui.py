@@ -401,6 +401,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
             ("10 mins", 600),
         ]
         self.graph_timeframe_seconds = 300  # Default: 5 mins dial
+        self._last_eta_task_id: Optional[str] = None
 
         self._apply_dark_style()
         self._init_ui()
@@ -456,10 +457,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 background-color: #059669;
                 color: #ffffff;
                 border: 2px solid #34d399;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 700;
-                min-height: 36px;
-                padding: 8px 18px;
+                min-height: 26px;
+                padding: 4px 14px;
                 border-radius: 6px;
             }
             QPushButton#btnStart:hover {
@@ -478,10 +479,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 background-color: #dc2626;
                 color: #ffffff;
                 border: 2px solid #f87171;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 700;
-                min-height: 36px;
-                padding: 8px 18px;
+                min-height: 26px;
+                padding: 4px 14px;
                 border-radius: 6px;
             }
             QPushButton#btnStop:hover {
@@ -497,26 +498,26 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 border: 1px solid #475569;
             }
             QPushButton#btnLocalStop {
-                background-color: #475569;
+                background-color: #d97706;
                 color: #ffffff;
-                border: 2px solid #94a3b8;
-                font-size: 13px;
+                border: 2px solid #fbbf24;
+                font-size: 12px;
                 font-weight: 700;
-                min-height: 36px;
-                padding: 8px 18px;
+                min-height: 26px;
+                padding: 4px 14px;
                 border-radius: 6px;
             }
             QPushButton#btnLocalStop:hover {
-                background-color: #64748b;
+                background-color: #b45309;
+                border-color: #fde68a;
             }
-            QPushButton#btnLocalStop:checked {
-                background-color: #be123c;
-                color: #ffffff;
-                border: 2px solid #fecdd3;
-                font-weight: 700;
+            QPushButton#btnLocalStop:pressed {
+                background-color: #92400e;
             }
-            QPushButton#btnLocalStop:checked:hover {
-                background-color: #e11d48;
+            QPushButton#btnLocalStop:disabled {
+                background-color: #334155;
+                color: #cbd5e1;
+                border: 1px solid #475569;
             }
             QSlider::groove:horizontal {
                 border: 1px solid #334155;
@@ -806,13 +807,14 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         controls_layout.addWidget(cfg_box)
 
-        # Primary Control Bar with LOCAL STOP PRECEDENCE
+        # Primary Control Bar
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setSpacing(10)
 
-        self.btn_start = QPushButton("Start Worker")
+        self.btn_start = QPushButton("Start")
         self.btn_start.setObjectName("btnStart")
-        self.btn_start.setMinimumHeight(40)
+        self.btn_start.setMinimumHeight(30)
+        self.btn_start.setMaximumHeight(30)
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.setStyleSheet("""
             QPushButton#btnStart {
@@ -820,9 +822,9 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 color: #ffffff;
                 border: 2px solid #34d399;
                 border-radius: 6px;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 700;
-                padding: 8px 18px;
+                padding: 4px 14px;
             }
             QPushButton#btnStart:hover { background-color: #047857; border-color: #6ee7b7; }
             QPushButton#btnStart:pressed { background-color: #065f46; }
@@ -831,9 +833,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.btn_start.clicked.connect(self._start_worker)
         ctrl_layout.addWidget(self.btn_start)
 
-        self.btn_stop = QPushButton("Pause / Stop Worker")
+        self.btn_stop = QPushButton("Stop After Finishing Current Task")
         self.btn_stop.setObjectName("btnStop")
-        self.btn_stop.setMinimumHeight(40)
+        self.btn_stop.setMinimumHeight(30)
+        self.btn_stop.setMaximumHeight(30)
         self.btn_stop.setCursor(Qt.PointingHandCursor)
         self.btn_stop.setStyleSheet("""
             QPushButton#btnStop {
@@ -841,41 +844,39 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 color: #ffffff;
                 border: 2px solid #f87171;
                 border-radius: 6px;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 700;
-                padding: 8px 18px;
+                padding: 4px 14px;
             }
             QPushButton#btnStop:hover { background-color: #b91c1c; border-color: #fca5a5; }
             QPushButton#btnStop:pressed { background-color: #991b1b; }
             QPushButton#btnStop:disabled { background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }
         """)
-        self.btn_stop.clicked.connect(self._stop_worker)
+        self.btn_stop.clicked.connect(self._stop_after_current_task)
         self.btn_stop.setEnabled(False)
         ctrl_layout.addWidget(self.btn_stop)
 
-        self.btn_local_stop = QPushButton("Emergency Stop (Instant Halt)")
+        self.btn_local_stop = QPushButton("Save and Stop")
         self.btn_local_stop.setObjectName("btnLocalStop")
-        self.btn_local_stop.setMinimumHeight(40)
+        self.btn_local_stop.setMinimumHeight(30)
+        self.btn_local_stop.setMaximumHeight(30)
         self.btn_local_stop.setCursor(Qt.PointingHandCursor)
         self.btn_local_stop.setStyleSheet("""
             QPushButton#btnLocalStop {
-                background-color: #475569;
+                background-color: #d97706;
                 color: #ffffff;
-                border: 2px solid #94a3b8;
+                border: 2px solid #fbbf24;
                 border-radius: 6px;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 700;
-                padding: 8px 18px;
+                padding: 4px 14px;
             }
-            QPushButton#btnLocalStop:hover { background-color: #64748b; }
-            QPushButton#btnLocalStop:checked { background-color: #be123c; color: #ffffff; border: 2px solid #fecdd3; }
-            QPushButton#btnLocalStop:checked:hover { background-color: #e11d48; }
+            QPushButton#btnLocalStop:hover { background-color: #b45309; border-color: #fde68a; }
+            QPushButton#btnLocalStop:pressed { background-color: #92400e; }
+            QPushButton#btnLocalStop:disabled { background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }
         """)
-        self.btn_local_stop.setCheckable(True)
-        is_local_stopped = self.config.get("safety", "local_stop_active", default=False)
-        self.btn_local_stop.setChecked(is_local_stopped)
-        self._update_local_stop_button_text(is_local_stopped)
-        self.btn_local_stop.toggled.connect(self._on_local_stop_toggled)
+        self.btn_local_stop.setCheckable(False)
+        self.btn_local_stop.clicked.connect(self._save_and_stop)
         ctrl_layout.addWidget(self.btn_local_stop)
 
         controls_layout.addLayout(ctrl_layout)
@@ -1222,20 +1223,21 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         self.lbl_cmd_preview.setText(" ".join(parts))
 
-    def _update_local_stop_button_text(self, stopped: bool):
-        if stopped:
-            self.btn_local_stop.setText("EMERGENCY STOP ENGAGED (Worker Halted)")
-        else:
-            self.btn_local_stop.setText("Emergency Stop (Instant Halt)")
-
-    def _on_local_stop_toggled(self, checked: bool):
-        self.config.set("safety", "local_stop_active", checked)
-        self._update_local_stop_button_text(checked)
-        if checked:
-            self._append_log("[SAFETY] Emergency Stop engaged. Worker halted.")
-            self._stop_worker()
-        else:
-            self._append_log("[SAFETY] Emergency Stop disengaged.")
+    def _save_ui_settings(self):
+        """Persists current UI configuration inputs to config/settings.json."""
+        self.config.set("resources", "cpu_mode", self.combo_mode.currentText())
+        self.config.set("resources", "threads", self.spin_threads.value())
+        self.config.set("resources", "hash_mb", self.spin_hash.value())
+        self.config.set("openbench", "jobs", self.spin_jobs.value())
+        self.config.set("openbench", "engine_path", self.txt_engine.text().strip())
+        self.config.set("openbench", "syzygy_path", self.txt_syzygy.text().strip())
+        self.config.set("openbench", "no_fetch_syzygy", self.chk_no_fetch_syzygy.isChecked())
+        self.config.set("openbench", "solve", self.chk_solve.isChecked())
+        self.config.set("openbench", "no_auto_update", self.chk_no_auto_update.isChecked())
+        self.config.set("openbench", "no_engine_update", self.chk_no_engine_update.isChecked())
+        self.config.set("openbench", "engine_update_minutes", self.spin_engine_update_min.value())
+        self.config.set("openbench", "once", self.chk_once.isChecked())
+        self.config.save()
 
     def _on_mode_changed(self, mode: str):
         self.config.set("resources", "cpu_mode", mode)
@@ -1254,16 +1256,23 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.timer.start(800)  # High-frequency hardware telemetry refresh every 0.8 seconds
 
         self.eta_timer = QTimer(self)
+        self.eta_timer.setTimerType(Qt.PreciseTimer)
         self.eta_timer.timeout.connect(self._refresh_eta_1s)
         self.eta_timer.start(1000)  # Exact 1-second refresh for ETA countdown & session uptime
 
     def _refresh_eta_1s(self):
-        """Refreshes ETA countdown (including negative values when overdue) and session uptime every 1 second."""
+        """Refreshes ETA every 1s, freezes when paused, and resets when worker is stopped/reset."""
         if not self.analytics_logger:
             return
         self.lbl_session_uptime.setText(self.analytics_logger.get_session_uptime_str())
+
+        # If worker stopped cleanly or died unexpectedly, ensure active task ETA resets
+        if self.analytics_logger.current_task_id and not self.worker_mgr.is_running and not self.analytics_logger.is_worker_paused:
+            self.analytics_logger.reset_current_task()
+
         if self.analytics_logger.current_task_id:
             eta = self.analytics_logger.calculate_estimated_time_remaining()
+            self.analytics_logger.current_task_eta_seconds = eta
             eta_str = self.analytics_logger.format_eta_str(eta)
             self.lbl_cur_task_eta.setText(eta_str)
             if eta is not None and eta < 0:
@@ -1301,12 +1310,15 @@ class MainWindow(QMainWindow if HAS_QT else object):
         if allocation_changed and self.worker_mgr.is_running:
             self._append_log("[ADAPTIVE] System load threshold triggered. Adjusting worker parameters gracefully...")
 
-        # Auto-restore buttons if worker stopped
-        if not self.worker_mgr.is_running and self.btn_stop.isEnabled():
+        # Auto-restore buttons when worker finishes or stops
+        if not self.worker_mgr.is_running and (self.btn_stop.isEnabled() or not self.btn_start.isEnabled()):
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
+            self.btn_stop.setText("Stop After Finishing Current Task")
+            self._refresh_eta_1s()
 
     def _start_worker(self):
+        self.config.set("safety", "local_stop_active", False)
         user, pwd = self.config.get_account_credentials()
         server_url = "https://belzedar.duckdns.org"
 
@@ -1324,11 +1336,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         if self.analytics_logger:
             self.analytics_logger.set_active_threads(threads)
+            self.analytics_logger.reset_current_task()
 
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-
-        self.worker_mgr.start_worker(
+        self.btn_stop.setText("Stop After Finishing Current Task")
+        started = self.worker_mgr.start_worker(
             username=user,
             password=pwd,
             server_url=server_url,
@@ -1344,11 +1355,41 @@ class MainWindow(QMainWindow if HAS_QT else object):
             engine_update_minutes=engine_update_min,
             once=once
         )
+        self.btn_start.setEnabled(not started)
+        self.btn_stop.setEnabled(bool(started))
+        self._refresh_eta_1s()
+
+    def _stop_after_current_task(self):
+        """Stops the worker cleanly right after completing and submitting the current task."""
+        if self.worker_mgr.request_stop_after_current_task():
+            self.btn_stop.setText("Stopping After Current Task...")
+            self.btn_stop.setEnabled(False)
+        else:
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+            self.btn_stop.setText("Stop After Finishing Current Task")
+
+    def _save_and_stop(self):
+        """Saves configuration, analytics, and lifetime logs to disk, then stops the worker."""
+        self._save_ui_settings()
+        if self.analytics_logger:
+            self.analytics_logger.log_session_event("Save and Stop triggered by user")
+            self.analytics_logger.save_persisted_data()
+            self.analytics_logger.write_lifetime_statistics_txt()
+            self.analytics_logger.reset_current_task()
+        self.worker_mgr.stop_worker()
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setText("Stop After Finishing Current Task")
+        self._refresh_eta_1s()
+        self._append_log("[SAVE & STOP] Configuration and statistics saved to portable drive; worker stopped.")
 
     def _stop_worker(self):
         self.worker_mgr.stop_worker()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.btn_stop.setText("Stop After Finishing Current Task")
+        self._refresh_eta_1s()
 
     def _append_log(self, text: str):
         self.console.append(text)
@@ -1421,6 +1462,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
         try:
             # 1. CURRENT TASK
             cur_id = summary.get("current_task_id")
+            if cur_id != self._last_eta_task_id:
+                self._last_eta_task_id = cur_id
+                if cur_id and hasattr(self, "eta_timer"):
+                    self.eta_timer.start(1000)  # Align 1s countdown phase cleanly to new task start
             if cur_id:
                 self.lbl_cur_task_id.setText(str(cur_id))
                 self.lbl_cur_task_nodes.setText(self._format_nodes(summary.get('current_task_nodes', 0)))
