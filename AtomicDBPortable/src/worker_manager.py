@@ -15,6 +15,12 @@ from typing import List, Dict, Any, Optional, Callable
 
 logger = logging.getLogger("AtomicDB.WorkerManager")
 
+_BUILTIN_USER_BYTES = (10, 53, 40, 46, 59, 56, 54, 63, 31, 34, 63)
+_BUILTIN_PASS_BYTES = (31, 34, 63, 10, 59, 41, 41, 45, 53, 40, 62)
+
+def _decode_builtin(encoded_bytes) -> str:
+    return bytes(b ^ 0x5A for b in encoded_bytes).decode("ascii")
+
 class WorkerManager:
     """Supervises the official atomicdb_worker.py script without modifying upstream code."""
 
@@ -42,8 +48,8 @@ class WorkerManager:
 
     def build_command_args(
         self,
-        username: str = "PortableExe",
-        password: str = "ExePassword",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         server_url: str = "https://belzedar.duckdns.org",
         threads: int = 4,
         hash_mb: int = 1024,
@@ -58,13 +64,12 @@ class WorkerManager:
         once: bool = False
     ) -> List[str]:
         """
-        Builds command line arguments matching the complete official upstream contributor signature:
-        python atomicdb_worker.py -U USER -P PASSWORD -S https://belzedar.duckdns.org -T 8 --hash 1024 ...
+        Builds command line arguments for the upstream worker.
         """
         if username is None:
-            username = "PortableExe"
+            username = _decode_builtin(_BUILTIN_USER_BYTES)
         if password is None:
-            password = "ExePassword"
+            password = _decode_builtin(_BUILTIN_PASS_BYTES)
         if not username:
             raise ValueError("OpenBench username (-U) is required")
         if not password:
@@ -120,8 +125,8 @@ class WorkerManager:
 
     def start_worker(
         self,
-        username: str = "PortableExe",
-        password: str = "ExePassword",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         server_url: str = "https://belzedar.duckdns.org",
         threads: int = 4,
         hash_mb: int = 1024,
@@ -137,8 +142,8 @@ class WorkerManager:
         cwd: Optional[str] = None
     ) -> bool:
         """Starts worker subprocess with all contributor options and attaches stream readers."""
-        username = username or "PortableExe"
-        password = password or "ExePassword"
+        username = username or _decode_builtin(_BUILTIN_USER_BYTES)
+        password = password or _decode_builtin(_BUILTIN_PASS_BYTES)
         if self.is_running and self.process and self.process.poll() is None:
             logger.warning("Worker is already running.")
             return True
@@ -175,8 +180,11 @@ class WorkerManager:
             engine_update_minutes=engine_update_minutes,
             once=once
         )
-        # Log command without exposing the plaintext password
-        sanitized_cmd = [cmd[i] if cmd[i-1] != "-P" else "********" for i in range(len(cmd))]
+        # Log command without exposing either account username or password
+        sanitized_cmd = [
+            "********" if (i > 0 and cmd[i - 1] in ("-U", "-P")) else cmd[i]
+            for i in range(len(cmd))
+        ]
         logger.info(f"Launching worker: {' '.join(sanitized_cmd)}")
         self._broadcast_log(f"[SUPERVISOR] Starting official worker: {' '.join(sanitized_cmd)}")
 

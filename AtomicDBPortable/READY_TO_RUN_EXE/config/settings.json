@@ -5,8 +5,8 @@
   },
   "openbench": {
     "server": "https://belzedar.duckdns.org",
-    "username": "PortableExe",
-    "password_encrypted": "TH9sV2h6en52eWs=",
+    "username": "",
+    "password_encrypted": "",
     "jobs": 1,
     "engine_path": "",
     "syzygy_path": "",
@@ -33,6 +33,5 @@
   },
   "safety": {
     "local_stop_active": false
-  },
-  "test_key": "test_val"
+  }
 }

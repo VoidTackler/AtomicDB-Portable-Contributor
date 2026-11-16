@@ -9,7 +9,7 @@ HOW TO USE:
 2. The application will start immediately.
 3. Select your CPU mode or thread count and click "Start".
 4. Optional account attribution: edit "account.txt" in this folder and set
-   USERNAME=... and PASSWORD=... (leave blank for PortableExe / ExePassword).
+   USERNAME=... and PASSWORD=... (leave blank to use the built-in default account).
 
 NOTES:
 - Zero installation or administrator privileges required.

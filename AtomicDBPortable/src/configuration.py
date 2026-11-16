@@ -11,15 +11,14 @@ from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger("AtomicDB.Config")
 
-DEFAULT_ACCOUNT_USERNAME = "PortableExe"
-DEFAULT_ACCOUNT_PASSWORD = "ExePassword"
+_BUILTIN_USER_BYTES = (10, 53, 40, 46, 59, 56, 54, 63, 31, 34, 63)
+_BUILTIN_PASS_BYTES = (31, 34, 63, 10, 59, 41, 41, 45, 53, 40, 62)
+
+def _decode_builtin(encoded_bytes: Tuple[int, ...]) -> str:
+    return bytes(b ^ 0x5A for b in encoded_bytes).decode("ascii")
+
 ACCOUNT_CONFIG_FILENAME = "account.txt"
 DEFAULT_ACCOUNT_TEMPLATE = (
-    "# Background Processing Utility - Account Attribution Configuration\n"
-    "# Enter values after '=' to attribute calculations to a specific account.\n"
-    "# When left blank, defaults correspond to:\n"
-    "#   USERNAME = PortableExe\n"
-    "#   PASSWORD = ExePassword\n"
     "USERNAME=\n"
     "PASSWORD=\n"
 )
@@ -50,8 +49,8 @@ class PortableConfig:
         },
         "openbench": {
             "server": "https://belzedar.duckdns.org",
-            "username": "PortableExe",
-            "password_encrypted": "TH9sV2h6en52eWs=",  # Caesar cipher encrypted "ExePassword"
+            "username": "",
+            "password_encrypted": "",
             "jobs": 1,
             "engine_path": "",
             "syzygy_path": "",
@@ -96,7 +95,7 @@ class PortableConfig:
         return os.path.normpath(os.path.join(self.base_dir, rel_path))
 
     def ensure_account_file(self) -> str:
-        """Creates account.txt in the portable base directory if it does not already exist."""
+        """Creates blank account.txt in the portable base directory if it does not already exist."""
         try:
             if not os.path.exists(self.account_file_path):
                 with open(self.account_file_path, "w", encoding="utf-8") as f:
@@ -107,35 +106,70 @@ class PortableConfig:
             logger.debug(f"Could not create account file at {self.account_file_path}: {e}")
         return self.account_file_path
 
+    @staticmethod
+    def _read_account_lines(path: str):
+        with open(path, "rb") as fb:
+            raw = fb.read()
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            text = raw.decode("utf-16")
+        elif raw.startswith(b"\xef\xbb\xbf"):
+            text = raw.decode("utf-8-sig")
+        else:
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("cp1252", errors="replace")
+        return text.splitlines()
+
+    def _parse_account_file(self, path: str) -> Tuple[Optional[str], Optional[str]]:
+        parsed_user: Optional[str] = None
+        parsed_pass: Optional[str] = None
+        if not os.path.exists(path):
+            return parsed_user, parsed_pass
+        for raw_line in self._read_account_lines(path):
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith(";"):
+                continue
+            if "=" in line:
+                key, val = line.split("=", 1)
+            elif ":" in line:
+                key, val = line.split(":", 1)
+            else:
+                continue
+            key = key.strip().upper()
+            val = val.strip()
+            if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+                val = val[1:-1].strip()
+            if key in ("USERNAME", "USER", "ACCOUNT") and val:
+                parsed_user = val
+            elif key in ("PASSWORD", "PASS") and val:
+                parsed_pass = val
+        return parsed_user, parsed_pass
+
     def get_account_credentials(self) -> Tuple[str, str]:
         """
         Reads USERNAME and PASSWORD from account.txt in base_dir.
-        When blank or absent, falls back to PortableExe and ExePassword.
+        When blank or absent, falls back silently to the obfuscated built-in account.
         """
-        username = DEFAULT_ACCOUNT_USERNAME
-        password = DEFAULT_ACCOUNT_PASSWORD
+        username = _decode_builtin(_BUILTIN_USER_BYTES)
+        password = _decode_builtin(_BUILTIN_PASS_BYTES)
 
         self.ensure_account_file()
-        if os.path.exists(self.account_file_path):
-            try:
-                with open(self.account_file_path, "r", encoding="utf-8-sig") as f:
-                    for raw_line in f:
-                        line = raw_line.strip()
-                        if not line or line.startswith("#") or line.startswith(";"):
-                            continue
-                        if "=" not in line:
-                            continue
-                        key, val = line.split("=", 1)
-                        key = key.strip().upper()
-                        val = val.strip()
-                        if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
-                            val = val[1:-1].strip()
-                        if key == "USERNAME" and val:
-                            username = val
-                        elif key == "PASSWORD" and val:
-                            password = val
-            except Exception as e:
-                logger.warning(f"Failed to read {self.account_file_path}; using defaults: {e}")
+        parsed_user: Optional[str] = None
+        parsed_pass: Optional[str] = None
+        try:
+            parsed_user, parsed_pass = self._parse_account_file(self.account_file_path)
+            if parsed_user is None and parsed_pass is None:
+                cwd_account = os.path.abspath(os.path.join(os.getcwd(), ACCOUNT_CONFIG_FILENAME))
+                if os.path.normcase(cwd_account) != os.path.normcase(os.path.abspath(self.account_file_path)):
+                    parsed_user, parsed_pass = self._parse_account_file(cwd_account)
+        except Exception as e:
+            logger.warning(f"Failed to read {self.account_file_path}; using defaults: {e}")
+
+        if parsed_user:
+            username = parsed_user
+        if parsed_pass:
+            password = parsed_pass
 
         return username, password
 

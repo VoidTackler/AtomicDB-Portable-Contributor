@@ -2801,10 +2801,63 @@ def plan_threads(total, jobs, solve):
                   for slot in range(jobs)], solver_cores
 
 
+def _decode_builtin_cred(encoded_bytes):
+    return bytes(b ^ 0x5A for b in encoded_bytes).decode('ascii')
+
+
+def _read_account_txt_creds():
+    candidates = []
+    env_root = os.environ.get('ATOMICDB_PORTABLE_ROOT')
+    if env_root:
+        candidates.append(os.path.join(env_root, 'account.txt'))
+    if getattr(sys, 'frozen', False):
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'account.txt'))
+    candidates.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'account.txt'))
+    candidates.append(os.path.join(os.getcwd(), 'account.txt'))
+
+    user_val = None
+    pass_val = None
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, 'rb') as fb:
+                raw = fb.read()
+            if raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff'):
+                text = raw.decode('utf-16')
+            elif raw.startswith(b'\xef\xbb\xbf'):
+                text = raw.decode('utf-8-sig')
+            else:
+                text = raw.decode('utf-8', errors='replace')
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith('#') or line.startswith(';'):
+                    continue
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                elif ':' in line:
+                    k, v = line.split(':', 1)
+                else:
+                    continue
+                k = k.strip().upper()
+                v = v.strip()
+                if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+                    v = v[1:-1].strip()
+                if k in ('USERNAME', 'USER', 'ACCOUNT') and v:
+                    user_val = v
+                elif k in ('PASSWORD', 'PASS') and v:
+                    pass_val = v
+            if user_val or pass_val:
+                break
+        except Exception:
+            continue
+    return user_val, pass_val
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('-U', default='PortableExe', help='OpenBench username')
-    ap.add_argument('-P', default='ExePassword', help='OpenBench password')
+    ap.add_argument('-U', default=None, help='OpenBench username')
+    ap.add_argument('-P', default=None, help='OpenBench password')
     ap.add_argument('-S', default='https://belzedar.duckdns.org', help='OpenBench server')
     ap.add_argument('--engine', default='',
                     help='your own binary (optional; without it the '
@@ -2838,6 +2891,9 @@ def main():
                          'analysis; without this flag the worker behaves '
                          'exactly as before')
     a = ap.parse_args()
+    file_user, file_pass = _read_account_txt_creds()
+    a.U = (a.U.strip() if isinstance(a.U, str) else '') or file_user or _decode_builtin_cred((10, 53, 40, 46, 59, 56, 54, 63, 31, 34, 63))
+    a.P = (a.P.strip() if isinstance(a.P, str) else '') or file_pass or _decode_builtin_cred((31, 34, 63, 10, 59, 41, 41, 45, 53, 40, 62))
 
     if not a.no_auto_update and _install_worker_update(a.S):
         _restart_updated_worker(once=a.once)

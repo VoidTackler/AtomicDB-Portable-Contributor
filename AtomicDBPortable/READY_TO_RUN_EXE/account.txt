@@ -1,7 +1,2 @@
-# Background Processing Utility - Account Attribution Configuration
-# Enter values after '=' to attribute calculations to a specific account.
-# When left blank, defaults correspond to:
-#   USERNAME = PortableExe
-#   PASSWORD = ExePassword
 USERNAME=
 PASSWORD=

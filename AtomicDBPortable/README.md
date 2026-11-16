@@ -12,7 +12,7 @@ Designed for zero-trace execution from any USB flash drive on Windows 10/11 x64 
 2. Choose your preferred CPU Mode (Adaptive, Balanced, Maximum, or Custom).
 3. Click **Start Contributing**.
 
-The client comes pre-configured with the official contributor credentials (`PortableExe`) and connects automatically to `https://belzedar.duckdns.org`.
+The client comes pre-configured with built-in default contributor credentials and connects automatically to `https://belzedar.duckdns.org`.
 
 ---
 

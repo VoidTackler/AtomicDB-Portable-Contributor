@@ -123,7 +123,7 @@ def main():
         server = config.get("openbench", "server", default="https://belzedar.duckdns.org")
 
         threads, hash_mb = resource_mgr.compute_allocation()
-        logger.info(f"Starting worker in headless mode (user={user}, threads={threads}, hash={hash_mb}MB)...")
+        logger.info(f"Starting worker in headless mode (threads={threads}, hash={hash_mb}MB)...")
         worker_mgr.start_worker(user, pwd, server, threads, hash_mb)
 
         try:

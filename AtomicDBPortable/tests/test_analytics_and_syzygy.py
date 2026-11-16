@@ -489,6 +489,146 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         self.assertIsNone(self.logger.current_task_id)
         self.assertIsNone(self.logger.calculate_estimated_time_remaining())
 
+    def test_no_readable_default_credentials_exposed(self):
+        from AtomicDBPortable.src.configuration import PortableConfig
+
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+        tmp_cfg = PortableConfig()
+        expected_u, expected_p = tmp_cfg.get_account_credentials()
+
+        # Verify generated/distributed account.txt stays strictly blank without readable secrets
+        old_root = os.environ.get("ATOMICDB_PORTABLE_ROOT")
+        os.environ["ATOMICDB_PORTABLE_ROOT"] = self.test_dir
+        try:
+            isolated = PortableConfig()
+            with open(os.path.join(self.test_dir, "account.txt"), "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertEqual(content, "USERNAME=\nPASSWORD=\n")
+            self.assertNotIn(expected_u, content)
+            self.assertNotIn(expected_p, content)
+        finally:
+            if old_root is None:
+                os.environ.pop("ATOMICDB_PORTABLE_ROOT", None)
+            else:
+                os.environ["ATOMICDB_PORTABLE_ROOT"] = old_root
+
+        # Check all shipping source, config, txt, and doc files have no readable credential strings
+        paths_to_check = [
+            os.path.join(root_dir, "account.txt"),
+            os.path.join(root_dir, "READY_TO_RUN_EXE", "account.txt"),
+            os.path.join(root_dir, "READY_TO_RUN_EXE", "README_USB.txt"),
+            os.path.join(root_dir, "README.md"),
+            os.path.join(root_dir, "config", "settings.json"),
+            os.path.join(root_dir, "READY_TO_RUN_EXE", "config", "settings.json"),
+            os.path.join(root_dir, "src", "configuration.py"),
+            os.path.join(root_dir, "src", "worker_manager.py"),
+            os.path.join(root_dir, "src", "main.py"),
+            os.path.join(root_dir, "worker", "atomicdb_worker.py"),
+        ]
+        for p in paths_to_check:
+            with open(p, "r", encoding="utf-8") as f:
+                text = f.read()
+            self.assertNotIn(expected_u, text, f"Readable username found in {p}")
+            self.assertNotIn(expected_p, text, f"Readable password found in {p}")
+
+        # Verify worker_manager logs redact both -U and -P
+        with open(os.path.join(root_dir, "src", "worker_manager.py"), "r", encoding="utf-8") as f:
+            wm_src = f.read()
+        self.assertIn('("-U", "-P")', wm_src)
+
+    def test_account_credentials_affect_worker_attribution_payload(self):
+        import importlib.util
+        import types
+        from unittest.mock import patch
+        from AtomicDBPortable.src.configuration import PortableConfig
+        from AtomicDBPortable.src.worker_manager import WorkerManager
+
+        with tempfile.TemporaryDirectory() as tmp_dir, tempfile.TemporaryDirectory() as cwd_dir:
+            acct_path = os.path.join(tmp_dir, "account.txt")
+            # UTF-16 LE BOM (e.g., PowerShell Out-File / Notepad) must still parse cleanly
+            with open(acct_path, "wb") as fb:
+                fb.write("USERNAME=CustomAttrUser\nPASSWORD=CustomAttrPass\n".encode("utf-16"))
+
+            with patch.dict(os.environ, {"ATOMICDB_PORTABLE_ROOT": tmp_dir}):
+                cfg = PortableConfig()
+                u, p = cfg.get_account_credentials()
+                self.assertEqual((u, p), ("CustomAttrUser", "CustomAttrPass"))
+
+                # Verify WorkerManager puts exact credentials on CLI for both script and frozen exe modes
+                wm = WorkerManager("/tmp/Background Processing Utility.exe", "AtomicDBPortable/worker/atomicdb_worker.py")
+                cmd = wm.build_command_args(username=u, password=p)
+                self.assertEqual(cmd[1], "--exec-worker")
+                self.assertEqual(cmd[cmd.index("-U") + 1], "CustomAttrUser")
+                self.assertEqual(cmd[cmd.index("-P") + 1], "CustomAttrPass")
+
+            # Verify fallback to cwd/account.txt when base_dir/account.txt is blank
+            with open(acct_path, "w", encoding="utf-8") as f:
+                f.write("USERNAME=\nPASSWORD=\n")
+            with open(os.path.join(cwd_dir, "account.txt"), "w", encoding="utf-8") as f:
+                f.write("USERNAME=CwdUser\nPASSWORD=CwdPass\n")
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(cwd_dir)
+                with patch.dict(os.environ, {"ATOMICDB_PORTABLE_ROOT": tmp_dir}):
+                    cfg2 = PortableConfig()
+                    self.assertEqual(cfg2.get_account_credentials(), ("CwdUser", "CwdPass"))
+            finally:
+                os.chdir(old_cwd)
+
+            # Verify atomicdb_worker sends the custom username, password, and machine prefix in /api/lease & /api/submit
+            captured_posts = []
+            fake_requests = types.ModuleType("requests")
+            fake_requests.RequestException = Exception
+
+            class _StopLoop(BaseException):
+                pass
+
+            class _FakeSession:
+                def mount(self, *a, **kw):
+                    pass
+
+                def post(self, url, data=None, **kw):
+                    captured_posts.append((url, dict(data or {})))
+                    raise _StopLoop()
+
+            fake_requests.Session = _FakeSession
+            fake_adapters = types.ModuleType("requests.adapters")
+            fake_adapters.HTTPAdapter = lambda **kw: object()
+            fake_urllib3 = types.ModuleType("urllib3")
+            fake_urllib3_util = types.ModuleType("urllib3.util")
+            fake_urllib3_retry = types.ModuleType("urllib3.util.retry")
+            fake_urllib3_retry.Retry = lambda **kw: object()
+
+            worker_path = os.path.abspath(
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "worker", "atomicdb_worker.py")
+            )
+            with patch.dict(sys.modules, {
+                "requests": fake_requests,
+                "requests.adapters": fake_adapters,
+                "urllib3": fake_urllib3,
+                "urllib3.util": fake_urllib3_util,
+                "urllib3.util.retry": fake_urllib3_retry,
+            }):
+                spec = importlib.util.spec_from_file_location("test_atomicdb_worker_attr", worker_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.Engine = lambda *a, **kw: type("FakeEng", (), {"close": lambda self: None})()
+                mod._file_sha256 = lambda path: "deadbeef"
+                mod._net_sha256 = lambda path: ""
+                with patch.object(sys, "argv", [
+                    worker_path, "-U", "CustomAttrUser", "-P", "CustomAttrPass",
+                    "--engine", sys.executable, "--no-fetch-syzygy", "--no-auto-update", "--once"
+                ]):
+                    with self.assertRaises(_StopLoop):
+                        mod.main()
+
+            self.assertEqual(len(captured_posts), 1)
+            post_url, post_data = captured_posts[0]
+            self.assertTrue(post_url.endswith("/atomicdb/api/lease"))
+            self.assertEqual(post_data["username"], "CustomAttrUser")
+            self.assertEqual(post_data["password"], "CustomAttrPass")
+            self.assertTrue(post_data["machine"].startswith("CustomAttrUser-"))
+
 
 if __name__ == "__main__":
     unittest.main()
