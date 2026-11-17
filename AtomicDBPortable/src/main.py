@@ -1,34 +1,30 @@
 """
 AtomicDB Portable - Main Executable Entrypoint
-Launches the native Windows GUI or headless supervisor for the distributed computing client.
+Launches the GUI or headless supervisor for the distributed computing client.
 """
 
 import os
 import sys
 import time
 import argparse
-import logging
 
 try:
     from .configuration import PortableConfig, get_base_dir
     from .logging_manager import setup_portable_logging
-    from .security import SecurityManager
     from .resource_manager import ResourceManager
     from .engine_manager import EngineManager
     from .worker_manager import WorkerManager
     from .analytics_logger import AnalyticsLogger
 except (ImportError, ValueError):
-    # Running directly as top-level script or compiled by PyInstaller
     from configuration import PortableConfig, get_base_dir
     from logging_manager import setup_portable_logging
-    from security import SecurityManager
     from resource_manager import ResourceManager
     from engine_manager import EngineManager
     from worker_manager import WorkerManager
     from analytics_logger import AnalyticsLogger
 
+
 def main():
-    # 0. Check if invoked as internal worker subprocess by compiled .exe
     if len(sys.argv) > 1 and sys.argv[1] == "--exec-worker":
         base_dir = get_base_dir()
         try:
@@ -43,14 +39,10 @@ def main():
         os.environ["TMP"] = portable_temp
 
         worker_script = os.path.join(base_dir, "worker", "atomicdb_worker.py")
-        if not os.path.exists(worker_script):
-            # Try PyInstaller temporary bundled directory if frozen
-            if hasattr(sys, '_MEIPASS'):
-                worker_script = os.path.join(sys._MEIPASS, "worker", "atomicdb_worker.py")
+        if not os.path.exists(worker_script) and hasattr(sys, "_MEIPASS"):
+            worker_script = os.path.join(sys._MEIPASS, "worker", "atomicdb_worker.py")
 
-        # Forward arguments to atomicdb_worker
-        forward_args = list(sys.argv[2:])
-        sys.argv = [worker_script] + forward_args
+        sys.argv = [worker_script] + list(sys.argv[2:])
         import runpy
         runpy.run_path(worker_script, run_name="__main__")
         sys.exit(0)
@@ -63,43 +55,29 @@ def main():
 
     base_dir = get_base_dir()
     logger = setup_portable_logging(base_dir)
-    logger.info("================================================================")
-    logger.info("   Starting Background Processing Utility (Windows x64)         ")
-    logger.info(f"   Base Directory: {base_dir}")
-    logger.info("================================================================")
+    logger.info("Starting Background Processing Utility (Windows x64) | Base: %s", base_dir)
 
-    # Initialize Subsystems
     config = PortableConfig()
-    security = SecurityManager()
     resource_mgr = ResourceManager(mode=args.mode or config.get("resources", "cpu_mode", default="Adaptive"))
-    
     engine_dir = config.get_path("engine")
     engine_mgr = EngineManager(engine_dir)
-
     analytics_logger = AnalyticsLogger(base_dir)
+    worker_mgr = WorkerManager(sys.executable, config.get_path("worker/atomicdb_worker.py"), analytics_logger=analytics_logger)
 
-    worker_script = config.get_path("worker/atomicdb_worker.py")
-    python_bin = sys.executable
-    worker_mgr = WorkerManager(python_bin, worker_script, analytics_logger=analytics_logger)
-
-    # Handle verify-only CLI argument
     if args.verify_only:
         selected_binary = config.get("engine", "selected_binary", default="atomic-stockfish-x64-avx2.exe")
-        bin_path = os.path.join(engine_dir, selected_binary)
-        verified, msg = engine_mgr.verify_binary(bin_path)
+        verified, msg = engine_mgr.verify_binary(os.path.join(engine_dir, selected_binary))
         logger.info(f"Engine verification: {msg}")
         sys.exit(0 if verified else 1)
 
-    # Determine whether to launch GUI or Headless
-    # Check if GUI is requested and PySide6 is available
-    use_gui = not args.headless
-    if use_gui:
+    if not args.headless:
         try:
             from PySide6.QtWidgets import QApplication
             try:
                 from .gui import MainWindow, APP_NAME, get_default_windows_app_icon
             except (ImportError, ValueError):
                 from gui import MainWindow, APP_NAME, get_default_windows_app_icon
+
             app = QApplication(sys.argv)
             app.setApplicationName(APP_NAME)
             app.setApplicationDisplayName(APP_NAME)
@@ -107,35 +85,32 @@ def main():
             default_icon = get_default_windows_app_icon()
             if default_icon and not default_icon.isNull():
                 app.setWindowIcon(default_icon)
-            window = MainWindow(config, resource_mgr, worker_mgr, engine_mgr, security, analytics_logger)
+
+            window = MainWindow(config, resource_mgr, worker_mgr, engine_mgr, analytics_logger=analytics_logger)
             if default_icon and not default_icon.isNull():
                 window.setWindowIcon(default_icon)
             window.show()
             sys.exit(app.exec())
         except (ImportError, RuntimeError) as e:
-            logger.warning(f"Could not initialize PySide6 GUI ({e}). Falling back to headless supervisor mode.")
-            use_gui = False
+            logger.warning(f"Could not initialize PySide6 GUI ({e}). Falling back to headless mode.")
 
-    if not use_gui:
-        # Headless supervisor loop
-        logger.info("Operating in headless supervisor mode (standalone, zero server requirements).")
-        user, pwd = config.get_account_credentials()
-        server = config.get("openbench", "server", default="https://belzedar.duckdns.org")
+    logger.info("Operating in headless supervisor mode.")
+    user, pwd = config.get_account_credentials()
+    server = config.get("openbench", "server", default="https://belzedar.duckdns.org")
+    threads, hash_mb = resource_mgr.compute_allocation()
+    logger.info(f"Starting worker (threads={threads}, hash={hash_mb}MB)...")
+    worker_mgr.start_worker(user, pwd, server, threads, hash_mb)
 
-        threads, hash_mb = resource_mgr.compute_allocation()
-        logger.info(f"Starting worker in headless mode (threads={threads}, hash={hash_mb}MB)...")
-        worker_mgr.start_worker(user, pwd, server, threads, hash_mb)
+    try:
+        while True:
+            time.sleep(5.0)
+            snapshot = resource_mgr.get_system_snapshot(worker_mgr.current_pid)
+            resource_mgr.update_adaptive_state(snapshot["system_cpu_pct"])
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received. Stopping worker...")
+        worker_mgr.stop_worker()
+        sys.exit(0)
 
-        try:
-            while True:
-                time.sleep(5.0)
-                snapshot = resource_mgr.get_system_snapshot(worker_mgr.current_pid)
-                # Adaptive load management
-                resource_mgr.update_adaptive_state(snapshot["system_cpu_pct"])
-        except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received. Stopping worker...")
-            worker_mgr.stop_worker()
-            sys.exit(0)
 
 if __name__ == "__main__":
     main()

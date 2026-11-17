@@ -1,12 +1,10 @@
 """
 AtomicDB Portable - PySide6 Native Windows GUI Application
-Provides real-time telemetry meters, allocation controls, and strict local stop precedence.
-Includes complete inputs, number spinners, checkboxes, session metrics, current task monitor with ETA,
-permanent lifetime statistics, and interactive real-time time-series graphs.
+Provides API configuration, live console, and real-time analytics/graphs.
 """
 
-import sys
 import os
+import sys
 import time
 import ctypes
 import logging
@@ -17,30 +15,29 @@ logger = logging.getLogger("AtomicDB.GUI")
 APP_NAME = "Background Processing Utility"
 IDI_APPLICATION = 32512  # Win32 MAKEINTRESOURCE(32512)
 
+
 def make_int_resource(resource_id: int) -> ctypes.c_void_p:
     """Equivalent to Win32 MAKEINTRESOURCE(id)."""
     return ctypes.c_void_p(int(resource_id) & 0xFFFF)
 
-# PySide6 imports with graceful headless fallback
+
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QGridLayout, QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
+        QGridLayout, QLayout, QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
         QCheckBox, QProgressBar, QTextEdit, QGroupBox, QLineEdit, QTabWidget,
-        QScrollArea, QSystemTrayIcon, QMenu, QMessageBox, QTableWidget,
-        QTableWidgetItem, QHeaderView, QSplitter, QFrame, QSizePolicy, QSlider, QStyle
+        QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
+        QSizePolicy, QSlider, QStyle,
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPointF, QRectF
-    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QBrush, QPolygonF, QImage, QPixmap
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QPointF, QRect, QSize
+    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QPolygonF, QImage, QPixmap
     HAS_QT = True
 except ImportError:
     HAS_QT = False
 
+
 def get_default_windows_app_icon():
-    """
-    Returns the default Windows application icon:
-    IDI_APPLICATION = MAKEINTRESOURCE(32512).
-    """
+    """Returns the default Windows application icon: IDI_APPLICATION = MAKEINTRESOURCE(32512)."""
     if not HAS_QT:
         return None
     if sys.platform == "win32":
@@ -63,41 +60,144 @@ def get_default_windows_app_icon():
         pass
     return QIcon()
 
+
 try:
     from .configuration import PortableConfig
     from .resource_manager import ResourceManager
     from .worker_manager import WorkerManager
     from .engine_manager import EngineManager
-    from .security import SecurityManager
-    from .analytics_logger import AnalyticsLogger, format_nodes_compact
+    from .analytics_logger import AnalyticsLogger, format_nodes_compact, format_nph
 except (ImportError, ValueError):
     from configuration import PortableConfig
     from resource_manager import ResourceManager
     from worker_manager import WorkerManager
     from engine_manager import EngineManager
-    from security import SecurityManager
-    from analytics_logger import AnalyticsLogger, format_nodes_compact
+    from analytics_logger import AnalyticsLogger, format_nodes_compact, format_nph
+
 
 class WorkerSignals(QObject if HAS_QT else object):
     if HAS_QT:
         log_received = Signal(str)
-        stats_updated = Signal(dict)
-        status_changed = Signal(str)
         analytics_updated = Signal(dict)
 
+
+def _action_btn_qss(obj_name: str, bg: str, border: str, hover_bg: str, hover_border: str, pressed_bg: str) -> str:
+    return (
+        f"QPushButton#{obj_name} {{ background-color: {bg}; color: #ffffff; border: 2px solid {border}; "
+        f"border-radius: 6px; font-size: 12px; font-weight: 700; padding: 4px 14px; }}\n"
+        f"QPushButton#{obj_name}:hover {{ background-color: {hover_bg}; border-color: {hover_border}; }}\n"
+        f"QPushButton#{obj_name}:pressed {{ background-color: {pressed_bg}; }}\n"
+        f"QPushButton#{obj_name}:disabled {{ background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }}"
+    )
+
+
+def _format_nps_rate(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f} M/s"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f} k/s"
+    return f"{n:,} /s"
+
+
+class _FlowLayout(QLayout if HAS_QT else object):
+    """Responsive wrapping layout that starts a new line when horizontal space runs out."""
+
+    def __init__(self, parent=None, spacing: int = 8, expand_rows: bool = False):
+        if not HAS_QT:
+            return
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self._expand_rows = expand_rows
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize(0, 0)
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        l, t, r, b = self.getContentsMargins()
+        return size + QSize(l + r, t + b)
+
+    def _do_layout(self, rect: "QRect", test_only: bool) -> int:
+        l, t, r, b = self.getContentsMargins()
+        eff = rect.adjusted(l, t, -r, -b)
+        max_w = max(1, eff.width())
+        rows = []
+        cur_row = []
+        cur_w = 0
+        row_h = 0
+
+        for item in self._items:
+            sz = item.sizeHint()
+            if cur_row and cur_w + self._spacing + sz.width() > max_w:
+                rows.append((cur_row, row_h))
+                cur_row = []
+                cur_w = 0
+                row_h = 0
+            cur_row.append((item, sz))
+            cur_w += (self._spacing if len(cur_row) > 1 else 0) + sz.width()
+            row_h = max(row_h, sz.height())
+        if cur_row:
+            rows.append((cur_row, row_h))
+
+        y = eff.y()
+        for row_idx, (row_items, r_h) in enumerate(rows):
+            x = eff.x()
+            total_base_w = sum(sz.width() for _, sz in row_items) + self._spacing * max(0, len(row_items) - 1)
+            extra = max(0, max_w - total_base_w) if (self._expand_rows and row_items) else 0
+            per_item_extra = extra // len(row_items) if row_items else 0
+            remainder = extra % len(row_items) if row_items else 0
+
+            for col_idx, (item, sz) in enumerate(row_items):
+                w = sz.width() + per_item_extra + (1 if col_idx < remainder else 0)
+                if not test_only:
+                    item.setGeometry(QRect(QPoint(x, y), QSize(w, r_h)))
+                x += w + self._spacing
+            y += r_h + (self._spacing if row_idx < len(rows) - 1 else 0)
+        return (y - eff.y()) + t + b
+
+
 # =============================================================================
-# REAL-TIME CANVAS CHART WIDGETS (THIS SESSION)
+# REAL-TIME CANVAS CHART WIDGETS
 # =============================================================================
 
-class CPUChartWidget(QWidget if HAS_QT else object):
-    """Real-time Canvas/Painter chart for System CPU % vs Worker CPU % over time."""
+class _BaseChartWidget(QWidget if HAS_QT else object):
+    """Shared canvas chart renderer for session telemetry charts."""
 
     def __init__(self, parent=None):
         if not HAS_QT:
             return
         super().__init__(parent)
         self.history: List[Dict[str, Any]] = []
-        self.setMinimumHeight(140)
+        self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
     def update_data(self, history: List[Dict[str, Any]]):
@@ -105,41 +205,63 @@ class CPUChartWidget(QWidget if HAS_QT else object):
         if HAS_QT:
             self.update()
 
-    def paintEvent(self, event):
-        if not HAS_QT:
-            return
+    def _begin_frame(self, title: str, right_txt: str, right_color: str, pad_l: int = 40):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        w = self.width()
-        h = self.height()
+        w, h = self.width(), self.height()
 
-        # Dark surface background & border
         painter.fillRect(0, 0, w, h, QColor("#020617"))
         painter.setPen(QPen(QColor("#1e293b"), 1))
         painter.drawRect(0, 0, w - 1, h - 1)
 
-        # Title & legend
         painter.setFont(QFont("Consolas", 9, QFont.Bold))
         painter.setPen(QColor("#94a3b8"))
-        painter.drawText(10, 18, "CPU USAGE OVER TIME (%)")
+        painter.drawText(10, 18, title)
 
-        sys_val = self.history[-1].get("system_cpu", 0) if self.history else 0
-        wrk_val = self.history[-1].get("worker_cpu", 0) if self.history else 0
-        txt = f"Sys: {sys_val:.1f}% | Wrk: {wrk_val:.1f}%"
-        painter.setPen(QColor("#38bdf8"))
-        painter.drawText(max(10, w - 180), 18, txt)
+        painter.setPen(QColor(right_color))
+        painter.drawText(max(10, w - 210 if len(right_txt) > 18 else w - 180), 18, right_txt)
 
-        pad_l, pad_r, pad_t, pad_b = 35, 10, 26, 18
+        pad_r, pad_t, pad_b = 10, 26, 18
         pw = max(10, w - pad_l - pad_r)
         ph = max(10, h - pad_t - pad_b)
+        return painter, w, h, pad_l, pad_t, pw, ph
 
-        # Horizontal gridlines
+    def _draw_x_timestamps(self, painter, h: int, pad_l: int, pw: int):
+        if not self.history:
+            return
+        painter.setFont(QFont("Consolas", 7))
+        painter.setPen(QColor("#64748b"))
+        painter.drawText(pad_l, h - 3, self.history[0].get("timestamp", ""))
+        if len(self.history) > 4:
+            painter.drawText(pad_l + pw // 2 - 25, h - 3, self.history[len(self.history) // 2].get("timestamp", ""))
+        painter.drawText(max(pad_l + pw // 2 + 10, pad_l + pw - 55), h - 3, self.history[-1].get("timestamp", ""))
+
+    def _draw_polyline(self, painter, key: str, max_val: float, pad_l: int, pad_t: int, pw: int, ph: int, color: str, width: float):
+        step = pw / max(1, len(self.history) - 1)
+        poly = QPolygonF()
+        for i, pt in enumerate(self.history):
+            val = min(max_val, max(0.0, float(pt.get(key, 0))))
+            poly.append(QPointF(pad_l + i * step, pad_t + ph * (1.0 - val / max_val)))
+        painter.setPen(QPen(QColor(color), width))
+        painter.drawPolyline(poly)
+
+
+class CPUChartWidget(_BaseChartWidget):
+    """Real-time chart for System CPU % vs Worker CPU % over time."""
+
+    def paintEvent(self, event):
+        if not HAS_QT:
+            return
+        sys_val = self.history[-1].get("system_cpu", 0) if self.history else 0
+        wrk_val = self.history[-1].get("worker_cpu", 0) if self.history else 0
+        painter, _w, h, pad_l, pad_t, pw, ph = self._begin_frame(
+            "CPU USAGE OVER TIME (%)", f"Sys: {sys_val:.1f}% | Wrk: {wrk_val:.1f}%", "#38bdf8", pad_l=35
+        )
         painter.setPen(QPen(QColor("#1e293b"), 1, Qt.DotLine))
         for pct in (0.25, 0.5, 0.75):
-            y = pad_t + ph * (1.0 - pct)
-            painter.drawLine(pad_l, int(y), pad_l + pw, int(y))
+            y = int(pad_t + ph * (1.0 - pct))
+            painter.drawLine(pad_l, y, pad_l + pw, y)
 
-        # Y Axis labels
         painter.setFont(QFont("Consolas", 8))
         painter.setPen(QColor("#64748b"))
         painter.drawText(4, int(pad_t + 10), "100%")
@@ -148,96 +270,31 @@ class CPUChartWidget(QWidget if HAS_QT else object):
 
         if len(self.history) < 2:
             painter.setPen(QColor("#475569"))
-            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting CPU telemetry (0.8s)...")
+            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting CPU telemetry (1s)...")
             return
 
-        n = len(self.history)
-        step = pw / max(1, n - 1)
-
-        # Draw System CPU line (Amber #fbbf24)
-        sys_poly = QPolygonF()
-        for i, pt in enumerate(self.history):
-            val = min(100.0, max(0.0, float(pt.get("system_cpu", 0))))
-            x = pad_l + i * step
-            y = pad_t + ph * (1.0 - val / 100.0)
-            sys_poly.append(QPointF(x, y))
-
-        painter.setPen(QPen(QColor("#fbbf24"), 1.8))
-        painter.drawPolyline(sys_poly)
-
-        # Draw Worker CPU line (Sky Blue #38bdf8)
-        wrk_poly = QPolygonF()
-        for i, pt in enumerate(self.history):
-            val = min(100.0, max(0.0, float(pt.get("worker_cpu", 0))))
-            x = pad_l + i * step
-            y = pad_t + ph * (1.0 - val / 100.0)
-            wrk_poly.append(QPointF(x, y))
-
-        painter.setPen(QPen(QColor("#38bdf8"), 2.0))
-        painter.drawPolyline(wrk_poly)
-
-        # Draw X-axis timestamps
-        painter.setFont(QFont("Consolas", 7))
-        painter.setPen(QColor("#64748b"))
-        t_start = self.history[0].get("timestamp", "")
-        t_end = self.history[-1].get("timestamp", "")
-        t_mid = self.history[len(self.history) // 2].get("timestamp", "")
-        painter.drawText(pad_l, h - 3, t_start)
-        if len(self.history) > 4:
-            painter.drawText(pad_l + pw // 2 - 25, h - 3, t_mid)
-        painter.drawText(max(pad_l + pw // 2 + 10, pad_l + pw - 55), h - 3, t_end)
+        self._draw_polyline(painter, "system_cpu", 100.0, pad_l, pad_t, pw, ph, "#fbbf24", 1.8)
+        self._draw_polyline(painter, "worker_cpu", 100.0, pad_l, pad_t, pw, ph, "#38bdf8", 2.0)
+        self._draw_x_timestamps(painter, h, pad_l, pw)
 
 
-class RAMChartWidget(QWidget if HAS_QT else object):
-    """Real-time Canvas/Painter chart for Worker RAM (RSS) vs Host Available RAM over time."""
-
-    def __init__(self, parent=None):
-        if not HAS_QT:
-            return
-        super().__init__(parent)
-        self.history: List[Dict[str, Any]] = []
-        self.setMinimumHeight(140)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-    def update_data(self, history: List[Dict[str, Any]]):
-        self.history = history or []
-        if HAS_QT:
-            self.update()
+class RAMChartWidget(_BaseChartWidget):
+    """Real-time chart for Worker RAM (RSS) vs Host Available RAM over time."""
 
     def paintEvent(self, event):
         if not HAS_QT:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        w = self.width()
-        h = self.height()
-
-        painter.fillRect(0, 0, w, h, QColor("#020617"))
-        painter.setPen(QPen(QColor("#1e293b"), 1))
-        painter.drawRect(0, 0, w - 1, h - 1)
-
-        painter.setFont(QFont("Consolas", 9, QFont.Bold))
-        painter.setPen(QColor("#94a3b8"))
-        painter.drawText(10, 18, "RAM USAGE OVER TIME (MB)")
-
         wrk_ram = self.history[-1].get("worker_ram", 0) if self.history else 0
         avail_ram = self.history[-1].get("available_ram", 0) if self.history else 0
-        txt = f"RSS: {wrk_ram} MB | Avail: {avail_ram} MB"
-        painter.setPen(QColor("#a78bfa"))
-        painter.drawText(max(10, w - 210), 18, txt)
+        painter, _w, h, pad_l, pad_t, pw, ph = self._begin_frame(
+            "RAM USAGE OVER TIME (MB)", f"RSS: {wrk_ram} MB | Avail: {avail_ram} MB", "#a78bfa"
+        )
+        max_val = max(max([pt.get("worker_ram", 0) for pt in self.history] + [1024]) * 1.3, 2048)
 
-        pad_l, pad_r, pad_t, pad_b = 40, 10, 26, 18
-        pw = max(10, w - pad_l - pad_r)
-        ph = max(10, h - pad_t - pad_b)
-
-        max_val = max([pt.get("worker_ram", 0) for pt in self.history] + [1024])
-        max_val = max(max_val * 1.3, 2048)
-
-        # Horizontal gridlines
         painter.setPen(QPen(QColor("#1e293b"), 1, Qt.DotLine))
         for pct in (0.33, 0.66):
-            y = pad_t + ph * (1.0 - pct)
-            painter.drawLine(pad_l, int(y), pad_l + pw, int(y))
+            y = int(pad_t + ph * (1.0 - pct))
+            painter.drawLine(pad_l, y, pad_l + pw, y)
 
         painter.setFont(QFont("Consolas", 8))
         painter.setPen(QColor("#64748b"))
@@ -246,128 +303,63 @@ class RAMChartWidget(QWidget if HAS_QT else object):
 
         if len(self.history) < 2:
             painter.setPen(QColor("#475569"))
-            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting RAM telemetry (0.8s)...")
+            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting RAM telemetry (1s)...")
             return
 
-        n = len(self.history)
-        step = pw / max(1, n - 1)
-
-        wrk_poly = QPolygonF()
-        for i, pt in enumerate(self.history):
-            val = min(max_val, max(0.0, float(pt.get("worker_ram", 0))))
-            x = pad_l + i * step
-            y = pad_t + ph * (1.0 - val / max_val)
-            wrk_poly.append(QPointF(x, y))
-
-        painter.setPen(QPen(QColor("#a78bfa"), 2.0))
-        painter.drawPolyline(wrk_poly)
-
-        # Draw X-axis timestamps
-        painter.setFont(QFont("Consolas", 7))
-        painter.setPen(QColor("#64748b"))
-        t_start = self.history[0].get("timestamp", "")
-        t_end = self.history[-1].get("timestamp", "")
-        t_mid = self.history[len(self.history) // 2].get("timestamp", "")
-        painter.drawText(pad_l, h - 3, t_start)
-        if len(self.history) > 4:
-            painter.drawText(pad_l + pw // 2 - 25, h - 3, t_mid)
-        painter.drawText(max(pad_l + pw // 2 + 10, pad_l + pw - 55), h - 3, t_end)
+        self._draw_polyline(painter, "worker_ram", max_val, pad_l, pad_t, pw, ph, "#a78bfa", 2.0)
+        self._draw_x_timestamps(painter, h, pad_l, pw)
 
 
-class NPSChartWidget(QWidget if HAS_QT else object):
-    """Real-time Canvas/Painter chart for Nodes Per Second across completed tasks this session."""
-
-    def __init__(self, parent=None):
-        if not HAS_QT:
-            return
-        super().__init__(parent)
-        self.history: List[Dict[str, Any]] = []
-        self.setMinimumHeight(140)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-    def update_data(self, history: List[Dict[str, Any]]):
-        self.history = history or []
-        if HAS_QT:
-            self.update()
+class NPSChartWidget(_BaseChartWidget):
+    """Real-time chart for Nodes Per Second across completed tasks this session."""
 
     def paintEvent(self, event):
         if not HAS_QT:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        w = self.width()
-        h = self.height()
-
-        painter.fillRect(0, 0, w, h, QColor("#020617"))
-        painter.setPen(QPen(QColor("#1e293b"), 1))
-        painter.drawRect(0, 0, w - 1, h - 1)
-
-        painter.setFont(QFont("Consolas", 9, QFont.Bold))
-        painter.setPen(QColor("#94a3b8"))
-        painter.drawText(10, 18, "NPS PER TASK (THIS SESSION)")
-
         latest_nps = self.history[-1].get("nps", 0) if self.history else 0
-        if latest_nps >= 1_000_000:
-            txt = f"Latest: {latest_nps / 1_000_000:.2f} M/s"
-        elif latest_nps >= 1_000:
-            txt = f"Latest: {latest_nps / 1_000:.1f} k/s"
-        else:
-            txt = f"Latest: {latest_nps:,}/s"
-        painter.setPen(QColor("#4ade80"))
-        painter.drawText(max(10, w - 180), 18, txt)
-
-        pad_l, pad_r, pad_t, pad_b = 40, 10, 26, 18
-        pw = max(10, w - pad_l - pad_r)
-        ph = max(10, h - pad_t - pad_b)
-
+        painter, _w, h, pad_l, pad_t, pw, ph = self._begin_frame(
+            "NPS PER TASK (THIS SESSION)", f"Latest: {_format_nps_rate(latest_nps)}", "#4ade80"
+        )
         if not self.history:
             painter.setPen(QColor("#475569"))
             painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "No completed tasks this session yet")
             return
 
-        max_nps = max([pt.get("nps", 0) for pt in self.history] + [100_000])
-        max_nps = max(max_nps * 1.2, 500_000)
-
-        # Horizontal gridline
+        max_nps = max(max([pt.get("nps", 0) for pt in self.history] + [100_000]) * 1.2, 500_000)
         painter.setPen(QPen(QColor("#1e293b"), 1, Qt.DotLine))
-        mid_y = pad_t + ph * 0.5
-        painter.drawLine(pad_l, int(mid_y), pad_l + pw, int(mid_y))
+        mid_y = int(pad_t + ph * 0.5)
+        painter.drawLine(pad_l, mid_y, pad_l + pw, mid_y)
 
         painter.setFont(QFont("Consolas", 8))
         painter.setPen(QColor("#64748b"))
-        if max_nps >= 1_000_000:
-            painter.drawText(4, int(pad_t + 10), f"{max_nps/1_000_000:.1f}M")
-        else:
-            painter.drawText(4, int(pad_t + 10), f"{int(max_nps/1000)}k")
+        top_lbl = f"{max_nps / 1_000_000:.1f}M" if max_nps >= 1_000_000 else f"{int(max_nps / 1000)}k"
+        painter.drawText(4, int(pad_t + 10), top_lbl)
         painter.drawText(10, int(pad_t + ph), "0")
 
         n = len(self.history)
         spacing = pw / max(1, n)
         bar_w = max(4.0, min(24.0, spacing - 4.0))
-
         painter.setFont(QFont("Consolas", 7))
-        painter.setPen(QColor("#64748b"))
         for i, pt in enumerate(self.history):
-            val = float(pt.get("nps", 0))
-            bh = min(ph, (val / max_nps) * ph)
+            bh = min(ph, (float(pt.get("nps", 0)) / max_nps) * ph)
             bx = pad_l + i * spacing + (spacing - bar_w) / 2.0
             by = pad_t + ph - bh
             painter.fillRect(int(bx), int(by), int(bar_w), int(bh), QColor("#38bdf8"))
             ts = pt.get("timestamp", "")
-            if ts and (n <= 5 or i == 0 or i == n - 1 or i == n // 2):
+            if ts and (n <= 5 or i in (0, n - 1, n // 2)):
                 painter.drawText(max(0, int(bx - 12)), h - 3, ts)
 
 
 # =============================================================================
-# MAIN WINDOW IMPLEMENTATION
+# MAIN WINDOW
 # =============================================================================
 
 class MainWindow(QMainWindow if HAS_QT else object):
-    """Main PySide6 Window for AtomicDB Portable Client."""
+    """Main PySide6 Window for Background Processing Utility."""
 
     def __init__(self, config: PortableConfig, resource_mgr: ResourceManager,
                  worker_mgr: WorkerManager, engine_mgr: EngineManager,
-                 security: SecurityManager, analytics_logger=None):
+                 security=None, analytics_logger=None):
         if not HAS_QT:
             raise RuntimeError("PySide6 is required to launch graphical interface.")
         super().__init__()
@@ -376,31 +368,28 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.resource_mgr = resource_mgr
         self.worker_mgr = worker_mgr
         self.engine_mgr = engine_mgr
-        self.security = security
-        self.analytics_logger = analytics_logger or getattr(worker_mgr, 'analytics_logger', None)
-        if not self.analytics_logger:
-            self.analytics_logger = AnalyticsLogger(self.config.base_dir)
-            self.worker_mgr.set_analytics_logger(self.analytics_logger)
+        self.analytics_logger = analytics_logger or getattr(worker_mgr, "analytics_logger", None) or AnalyticsLogger(self.config.base_dir)
+        self.worker_mgr.set_analytics_logger(self.analytics_logger)
 
         self.signals = WorkerSignals()
         self.worker_mgr.add_log_callback(self.signals.log_received.emit)
-        self.analytics_logger.add_listener(lambda summary: self.signals.analytics_updated.emit(summary))
+        self.analytics_logger.add_listener(self.signals.analytics_updated.emit)
         self.signals.analytics_updated.connect(self._update_analytics_ui)
 
         self.setWindowTitle(APP_NAME)
         default_icon = get_default_windows_app_icon()
         if default_icon and not default_icon.isNull():
             self.setWindowIcon(default_icon)
-        self.setMinimumSize(700, 480)
-        self.resize(1020, 840)
+        self.setMinimumSize(520, 420)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            self.resize(min(1020, max(560, avail.width() - 40)), min(820, max(460, avail.height() - 40)))
+        else:
+            self.resize(1020, 820)
 
-        # Graph timeframe options (3 set dials: 1.5 mins, 5 mins, 10 mins)
-        self._timeframe_options = [
-            ("1.5 mins", 90),
-            ("5 mins", 300),
-            ("10 mins", 600),
-        ]
-        self.graph_timeframe_seconds = 300  # Default: 5 mins dial
+        self._timeframe_options = [("1.5 mins", 90), ("5 mins", 300), ("10 mins", 600)]
+        self.graph_timeframe_seconds = 300
         self._last_eta_task_id: Optional[str] = None
 
         self._apply_dark_style()
@@ -409,520 +398,276 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self._update_cmd_preview()
 
     def _apply_dark_style(self):
-        """Applies a professional dark engineering palette matching fleet console."""
         self.setStyleSheet("""
             QMainWindow, QWidget#centralWidget, QWidget#controlsContainer, QScrollArea, QScrollArea > QWidget {
                 background-color: #0b1120;
             }
-            QWidget {
-                background-color: #0b1120;
-                color: #e2e8f0;
-                font-size: 13px;
-            }
+            QWidget { background-color: #0b1120; color: #e2e8f0; font-size: 13px; }
             QGroupBox {
-                border: 1px solid #1e293b;
-                border-radius: 8px;
-                margin-top: 14px;
-                padding-top: 16px;
-                font-weight: 600;
-                color: #38bdf8;
-                background-color: #0f172a;
+                border: 1px solid #1e293b; border-radius: 8px; margin-top: 14px;
+                padding-top: 16px; font-weight: 600; color: #38bdf8; background-color: #0f172a;
             }
-            QGroupBox QWidget, QGroupBox QLabel, QGroupBox QCheckBox {
-                background-color: transparent;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 4px;
-                background-color: #0f172a;
-            }
+            QGroupBox QWidget, QGroupBox QLabel, QGroupBox QCheckBox { background-color: transparent; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; background-color: #0f172a; }
             QPushButton {
-                background-color: #0369a1;
-                color: #ffffff;
-                border: 1px solid #38bdf8;
-                padding: 8px 16px;
-                border-radius: 6px;
-                font-weight: 700;
+                background-color: #0369a1; color: #ffffff; border: 1px solid #38bdf8;
+                padding: 8px 16px; border-radius: 6px; font-weight: 700;
             }
-            QPushButton:hover {
-                background-color: #0284c7;
-            }
-            QPushButton:disabled {
-                background-color: #1e293b;
-                color: #94a3b8;
-                border: 1px solid #334155;
-            }
-            QPushButton#btnStart {
-                background-color: #059669;
-                color: #ffffff;
-                border: 2px solid #34d399;
-                font-size: 12px;
-                font-weight: 700;
-                min-height: 26px;
-                padding: 4px 14px;
-                border-radius: 6px;
-            }
-            QPushButton#btnStart:hover {
-                background-color: #047857;
-                border-color: #6ee7b7;
-            }
-            QPushButton#btnStart:pressed {
-                background-color: #065f46;
-            }
-            QPushButton#btnStart:disabled {
-                background-color: #334155;
-                color: #cbd5e1;
-                border: 1px solid #475569;
-            }
-            QPushButton#btnStop {
-                background-color: #dc2626;
-                color: #ffffff;
-                border: 2px solid #f87171;
-                font-size: 12px;
-                font-weight: 700;
-                min-height: 26px;
-                padding: 4px 14px;
-                border-radius: 6px;
-            }
-            QPushButton#btnStop:hover {
-                background-color: #b91c1c;
-                border-color: #fca5a5;
-            }
-            QPushButton#btnStop:pressed {
-                background-color: #991b1b;
-            }
-            QPushButton#btnStop:disabled {
-                background-color: #334155;
-                color: #cbd5e1;
-                border: 1px solid #475569;
-            }
-            QPushButton#btnLocalStop {
-                background-color: #d97706;
-                color: #ffffff;
-                border: 2px solid #fbbf24;
-                font-size: 12px;
-                font-weight: 700;
-                min-height: 26px;
-                padding: 4px 14px;
-                border-radius: 6px;
-            }
-            QPushButton#btnLocalStop:hover {
-                background-color: #b45309;
-                border-color: #fde68a;
-            }
-            QPushButton#btnLocalStop:pressed {
-                background-color: #92400e;
-            }
-            QPushButton#btnLocalStop:disabled {
-                background-color: #334155;
-                color: #cbd5e1;
-                border: 1px solid #475569;
-            }
-            QSlider::groove:horizontal {
-                border: 1px solid #334155;
-                height: 6px;
-                background: #0f172a;
-                border-radius: 3px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #0284c7;
-                border-radius: 3px;
-            }
+            QPushButton:hover { background-color: #0284c7; }
+            QPushButton:disabled { background-color: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+            QSlider::groove:horizontal { border: 1px solid #334155; height: 6px; background: #0f172a; border-radius: 3px; }
+            QSlider::sub-page:horizontal { background: #0284c7; border-radius: 3px; }
             QSlider::handle:horizontal {
-                background: #38bdf8;
-                border: 2px solid #f8fafc;
-                width: 16px;
-                height: 16px;
-                margin: -6px 0;
-                border-radius: 9px;
+                background: #38bdf8; border: 2px solid #f8fafc;
+                width: 16px; height: 16px; margin: -6px 0; border-radius: 9px;
             }
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #1e293b;
-                border: 1px solid #334155;
-                padding: 6px 10px;
-                border-radius: 5px;
-                color: #f8fafc;
-                font-family: 'Consolas', 'JetBrains Mono', monospace;
+                background-color: #1e293b; border: 1px solid #334155; padding: 6px 10px;
+                border-radius: 5px; color: #f8fafc; font-family: 'Consolas', 'JetBrains Mono', monospace;
             }
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-                border: 1px solid #38bdf8;
-            }
-            QCheckBox {
-                spacing: 8px;
-                color: #cbd5e1;
-            }
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid #38bdf8; }
+            QCheckBox { spacing: 8px; color: #cbd5e1; }
             QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border: 1px solid #475569;
-                border-radius: 4px;
-                background-color: #1e293b;
+                width: 16px; height: 16px; border: 1px solid #64748b;
+                border-radius: 4px; background-color: #4b5563;
             }
-            QCheckBox::indicator:checked {
-                background-color: #0284c7;
-                border-color: #38bdf8;
-            }
+            QCheckBox::indicator:hover { background-color: #6b7280; }
+            QCheckBox::indicator:checked { background-color: #16a34a; border-color: #22c55e; }
+            QCheckBox::indicator:checked:hover { background-color: #15803d; }
             QProgressBar {
-                border: 1px solid #1e293b;
-                border-radius: 4px;
-                text-align: center;
-                background-color: #1e293b;
-                color: #ffffff;
+                border: 1px solid #334155; border-radius: 11px; text-align: center;
+                background-color: #1e293b; color: #ffffff; font-weight: 700;
                 font-family: 'Consolas', 'JetBrains Mono', monospace;
             }
-            QProgressBar::chunk {
-                background-color: #0284c7;
-                border-radius: 3px;
-            }
+            QProgressBar::chunk { background-color: #0284c7; border-radius: 10px; }
             QTextEdit {
-                background-color: #020617;
-                color: #38bdf8;
-                border: 1px solid #1e293b;
-                font-family: 'Consolas', 'JetBrains Mono', monospace;
-                font-size: 12px;
-                border-radius: 6px;
+                background-color: #020617; color: #38bdf8; border: 1px solid #1e293b;
+                font-family: 'Consolas', 'JetBrains Mono', monospace; font-size: 12px; border-radius: 6px;
             }
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QSplitter::handle:vertical {
-                background-color: #334155;
-                height: 8px;
-                border-radius: 4px;
-                margin: 2px 24px;
-            }
-            QSplitter::handle:vertical:hover {
-                background-color: #38bdf8;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: #0b1120;
-                width: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background: #334155;
-                min-height: 24px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #38bdf8;
-            }
-            QScrollBar:horizontal {
-                border: none;
-                background: #0b1120;
-                height: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #334155;
-                min-width: 24px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #38bdf8;
-            }
-            QScrollBar::add-line, QScrollBar::sub-line {
-                width: 0px;
-                height: 0px;
-            }
+            QScrollArea { border: none; background-color: transparent; }
+            QScrollBar:vertical { border: none; background: #0b1120; width: 10px; border-radius: 5px; }
+            QScrollBar::handle:vertical { background: #334155; min-height: 24px; border-radius: 5px; }
+            QScrollBar::handle:vertical:hover { background: #38bdf8; }
+            QScrollBar:horizontal { border: none; background: #0b1120; height: 10px; border-radius: 5px; }
+            QScrollBar::handle:horizontal { background: #334155; min-width: 24px; border-radius: 5px; }
+            QScrollBar::handle:horizontal:hover { background: #38bdf8; }
+            QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; }
         """)
+
+    @staticmethod
+    def _make_kpi(color: str, initial: str = "0", mono: bool = False) -> QLabel:
+        lbl = QLabel(initial)
+        font_family = " font-family: monospace;" if mono else ""
+        lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        lbl.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color};{font_family}")
+        return lbl
+
+    @staticmethod
+    def _make_card(title: str, widget: QLabel, subtext: str = "") -> QWidget:
+        box = QWidget()
+        box.setMinimumWidth(145)
+        layout = QVBoxLayout(box)
+        layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        lbl_t = QLabel(title)
+        lbl_t.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        lbl_t.setStyleSheet("color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600;")
+        layout.addWidget(lbl_t)
+        layout.addWidget(widget)
+        lbl_sub = QLabel(subtext if subtext else " ")
+        lbl_sub.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        lbl_sub.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 500;")
+        layout.addWidget(lbl_sub)
+        return box
 
     def _init_ui(self):
         main_widget = QWidget()
         main_widget.setObjectName("centralWidget")
-        main_widget.setStyleSheet("QWidget#centralWidget { background-color: #0b1120; }")
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(10, 8, 10, 10)
+        main_layout.setSpacing(8)
 
-        self.main_splitter = QSplitter(Qt.Vertical)
-        self.main_splitter.setChildrenCollapsible(False)
-        self.main_splitter.setHandleWidth(8)
-
-        # Upper pane: Scrollable controls container
-        scroll_controls = QScrollArea()
-        scroll_controls.setObjectName("scrollControls")
-        scroll_controls.setWidgetResizable(True)
-        scroll_controls.setFrameShape(QFrame.NoFrame)
-        scroll_controls.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_controls.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_controls.setMinimumHeight(120)
-        scroll_controls.setStyleSheet("QScrollArea#scrollControls { background-color: #0b1120; border: none; }")
-        if scroll_controls.viewport():
-            scroll_controls.viewport().setStyleSheet("background-color: #0b1120; border: none;")
-
-        controls_container = QWidget()
-        controls_container.setObjectName("controlsContainer")
-        controls_container.setStyleSheet("QWidget#controlsContainer { background-color: #0b1120; color: #e2e8f0; }")
-        controls_layout = QVBoxLayout(controls_container)
-        controls_layout.setContentsMargins(4, 4, 4, 4)
-        controls_layout.setSpacing(10)
-
-        # Header bar
-        header = QHBoxLayout()
+        # Header + 3 control buttons bar
+        header = _FlowLayout(spacing=12)
         title_label = QLabel("BACKGROUND PROCESSING UTILITY")
         title_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #f8fafc; letter-spacing: 0.5px;")
         header.addWidget(title_label)
-
         self.lbl_server_status = QLabel("Server: Fixed & Built-in (https://belzedar.duckdns.org)")
         self.lbl_server_status.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px;")
-        header.addStretch()
         header.addWidget(self.lbl_server_status)
-        controls_layout.addLayout(header)
+        main_layout.addLayout(header)
 
-        # Telemetry & Resource Monitor Box
-        res_box = QGroupBox("HOST HARDWARE & REAL-TIME TELEMETRY (0.8s REFRESH)")
-        res_layout = QVBoxLayout(res_box)
-
-        # CPU row
-        cpu_row = QHBoxLayout()
-        cpu_row.addWidget(QLabel("System CPU:"))
-        self.bar_sys_cpu = QProgressBar()
-        self.bar_sys_cpu.setRange(0, 100)
-        cpu_row.addWidget(self.bar_sys_cpu)
-
-        cpu_row.addWidget(QLabel("Worker CPU:"))
-        self.bar_worker_cpu = QProgressBar()
-        self.bar_worker_cpu.setRange(0, 100)
-        cpu_row.addWidget(self.bar_worker_cpu)
-        res_layout.addLayout(cpu_row)
-
-        # RAM row
-        ram_row = QHBoxLayout()
-        ram_row.addWidget(QLabel("RAM Allocation:"))
-        self.lbl_ram_details = QLabel("Detecting RAM...")
-        self.lbl_ram_details.setStyleSheet("color: #38bdf8; font-family: monospace;")
-        ram_row.addWidget(self.lbl_ram_details)
-        ram_row.addStretch()
-        self.lbl_cores = QLabel(f"Cores: {self.resource_mgr.physical_cores} Physical / {self.resource_mgr.logical_cores} Logical")
-        self.lbl_cores.setStyleSheet("color: #94a3b8;")
-        ram_row.addWidget(self.lbl_cores)
-        res_layout.addLayout(ram_row)
-
-        controls_layout.addWidget(res_box)
-
-        # Upstream parameters
-        cfg_box = QGroupBox("OPENBENCH CONTRIBUTOR API PARAMETERS (UPSTREAM VARIABLES)")
-        cfg_layout = QVBoxLayout(cfg_box)
-
-        grid_top = QGridLayout()
-        grid_top.addWidget(QLabel("Custom Engine (--engine):"), 0, 0)
-        self.txt_engine = QLineEdit()
-        self.txt_engine.setPlaceholderText("Optional path to custom engine binary (blank = default bundled engine)")
-        self.txt_engine.setText(self.config.get("openbench", "engine_path", default=""))
-        self.txt_engine.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_engine, 0, 1)
-
-        grid_top.addWidget(QLabel("Syzygy TBs (--syzygy):"), 1, 0)
-        self.txt_syzygy = QLineEdit()
-        self.txt_syzygy.setPlaceholderText("Directories separated by ; (blank = auto-manage on USB)")
-        self.txt_syzygy.setText(self.config.get("openbench", "syzygy_path", default=""))
-        self.txt_syzygy.textChanged.connect(self._update_cmd_preview)
-        grid_top.addWidget(self.txt_syzygy, 1, 1)
-        cfg_layout.addLayout(grid_top)
-
-        grid_num = QHBoxLayout()
-        grid_num.addWidget(QLabel("CPU Mode:"))
-        self.combo_mode = QComboBox()
-        self.combo_mode.addItems(["Adaptive", "Balanced", "Maximum", "Custom"])
-        current_mode = self.config.get("resources", "cpu_mode", default="Adaptive")
-        self.combo_mode.setCurrentText(current_mode)
-        self.combo_mode.currentTextChanged.connect(self._on_mode_changed)
-        grid_num.addWidget(self.combo_mode)
-
-        grid_num.addWidget(QLabel("Threads (-T):"))
-        self.spin_threads = QSpinBox()
-        self.spin_threads.setRange(1, self.resource_mgr.logical_cores)
-        self.spin_threads.setValue(self.config.get("resources", "threads", default=4))
-        self.spin_threads.valueChanged.connect(self._update_cmd_preview)
-        grid_num.addWidget(self.spin_threads)
-
-        grid_num.addWidget(QLabel("Jobs (--jobs):"))
-        self.spin_jobs = QSpinBox()
-        self.spin_jobs.setRange(1, 64)
-        self.spin_jobs.setValue(self.config.get("openbench", "jobs", default=1))
-        self.spin_jobs.setToolTip("Number of concurrent analyses to run, splitting -T threads")
-        self.spin_jobs.valueChanged.connect(self._update_cmd_preview)
-        grid_num.addWidget(self.spin_jobs)
-
-        grid_num.addWidget(QLabel("Hash MB (--hash):"))
-        self.spin_hash = QSpinBox()
-        self.spin_hash.setRange(64, 65536)
-        self.spin_hash.setSingleStep(128)
-        self.spin_hash.setValue(self.config.get("resources", "hash_mb", default=1024))
-        self.spin_hash.valueChanged.connect(self._update_cmd_preview)
-        grid_num.addWidget(self.spin_hash)
-
-        grid_num.addWidget(QLabel("Engine Check Min (--engine-update-minutes):"))
-        self.spin_engine_update_min = QDoubleSpinBox()
-        self.spin_engine_update_min.setRange(0.5, 1440.0)
-        self.spin_engine_update_min.setSingleStep(5.0)
-        self.spin_engine_update_min.setValue(float(self.config.get("openbench", "engine_update_minutes", default=15.0)))
-        self.spin_engine_update_min.valueChanged.connect(self._update_cmd_preview)
-        grid_num.addWidget(self.spin_engine_update_min)
-        cfg_layout.addLayout(grid_num)
-
-        chk_layout = QHBoxLayout()
-        self.chk_no_fetch_syzygy = QCheckBox("Disable Tablebases (--no-fetch-syzygy)")
-        self.chk_no_fetch_syzygy.setToolTip("Checked: skip Syzygy tablebases (saves disk/bandwidth)\nUnchecked: auto-manage tablebases on USB")
-        self.chk_no_fetch_syzygy.setChecked(self.config.get("openbench", "no_fetch_syzygy", default=True))
-        self.chk_no_fetch_syzygy.toggled.connect(self._update_cmd_preview)
-        chk_layout.addWidget(self.chk_no_fetch_syzygy)
-
-        self.chk_solve = QCheckBox("Solve Tasks (--solve)")
-        self.chk_solve.setToolTip("Serve exhaustive proof solve tasks")
-        self.chk_solve.setChecked(self.config.get("openbench", "solve", default=False))
-        self.chk_solve.toggled.connect(self._update_cmd_preview)
-        chk_layout.addWidget(self.chk_solve)
-
-        self.chk_no_auto_update = QCheckBox("No Worker Update (--no-auto-update)")
-        self.chk_no_auto_update.setChecked(self.config.get("openbench", "no_auto_update", default=False))
-        self.chk_no_auto_update.toggled.connect(self._update_cmd_preview)
-        chk_layout.addWidget(self.chk_no_auto_update)
-
-        self.chk_no_engine_update = QCheckBox("No Engine Update (--no-engine-update)")
-        self.chk_no_engine_update.setChecked(self.config.get("openbench", "no_engine_update", default=False))
-        self.chk_no_engine_update.toggled.connect(self._update_cmd_preview)
-        chk_layout.addWidget(self.chk_no_engine_update)
-
-        self.chk_once = QCheckBox("Run Once (--once)")
-        self.chk_once.setChecked(self.config.get("openbench", "once", default=False))
-        self.chk_once.toggled.connect(self._update_cmd_preview)
-        chk_layout.addWidget(self.chk_once)
-        cfg_layout.addLayout(chk_layout)
-
-        cmd_preview_row = QHBoxLayout()
-        cmd_preview_row.addWidget(QLabel("Command Preview:"))
-        self.lbl_cmd_preview = QLabel("python atomicdb_worker.py ...")
-        self.lbl_cmd_preview.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px;")
-        cmd_preview_row.addWidget(self.lbl_cmd_preview)
-        cmd_preview_row.addStretch()
-        cfg_layout.addLayout(cmd_preview_row)
-
-        controls_layout.addWidget(cfg_box)
-
-        # Primary Control Bar
-        ctrl_layout = QHBoxLayout()
-        ctrl_layout.setSpacing(10)
+        ctrl_layout = _FlowLayout(spacing=10)
 
         self.btn_start = QPushButton("Start")
         self.btn_start.setObjectName("btnStart")
-        self.btn_start.setMinimumHeight(30)
-        self.btn_start.setMaximumHeight(30)
+        self.btn_start.setFixedHeight(30)
         self.btn_start.setCursor(Qt.PointingHandCursor)
-        self.btn_start.setStyleSheet("""
-            QPushButton#btnStart {
-                background-color: #059669;
-                color: #ffffff;
-                border: 2px solid #34d399;
-                border-radius: 6px;
-                font-size: 12px;
-                font-weight: 700;
-                padding: 4px 14px;
-            }
-            QPushButton#btnStart:hover { background-color: #047857; border-color: #6ee7b7; }
-            QPushButton#btnStart:pressed { background-color: #065f46; }
-            QPushButton#btnStart:disabled { background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }
-        """)
+        self.btn_start.setStyleSheet(_action_btn_qss("btnStart", "#059669", "#34d399", "#047857", "#6ee7b7", "#065f46"))
         self.btn_start.clicked.connect(self._start_worker)
         ctrl_layout.addWidget(self.btn_start)
 
         self.btn_stop = QPushButton("Stop After Finishing Current Task")
         self.btn_stop.setObjectName("btnStop")
-        self.btn_stop.setMinimumHeight(30)
-        self.btn_stop.setMaximumHeight(30)
+        self.btn_stop.setFixedHeight(30)
         self.btn_stop.setCursor(Qt.PointingHandCursor)
-        self.btn_stop.setStyleSheet("""
-            QPushButton#btnStop {
-                background-color: #dc2626;
-                color: #ffffff;
-                border: 2px solid #f87171;
-                border-radius: 6px;
-                font-size: 12px;
-                font-weight: 700;
-                padding: 4px 14px;
-            }
-            QPushButton#btnStop:hover { background-color: #b91c1c; border-color: #fca5a5; }
-            QPushButton#btnStop:pressed { background-color: #991b1b; }
-            QPushButton#btnStop:disabled { background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }
-        """)
+        self.btn_stop.setStyleSheet(_action_btn_qss("btnStop", "#dc2626", "#f87171", "#b91c1c", "#fca5a5", "#991b1b"))
         self.btn_stop.clicked.connect(self._stop_after_current_task)
         self.btn_stop.setEnabled(False)
         ctrl_layout.addWidget(self.btn_stop)
 
         self.btn_local_stop = QPushButton("Save and Stop")
         self.btn_local_stop.setObjectName("btnLocalStop")
-        self.btn_local_stop.setMinimumHeight(30)
-        self.btn_local_stop.setMaximumHeight(30)
+        self.btn_local_stop.setFixedHeight(30)
         self.btn_local_stop.setCursor(Qt.PointingHandCursor)
-        self.btn_local_stop.setStyleSheet("""
-            QPushButton#btnLocalStop {
-                background-color: #d97706;
-                color: #ffffff;
-                border: 2px solid #fbbf24;
-                border-radius: 6px;
-                font-size: 12px;
-                font-weight: 700;
-                padding: 4px 14px;
-            }
-            QPushButton#btnLocalStop:hover { background-color: #b45309; border-color: #fde68a; }
-            QPushButton#btnLocalStop:pressed { background-color: #92400e; }
-            QPushButton#btnLocalStop:disabled { background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }
-        """)
-        self.btn_local_stop.setCheckable(False)
+        self.btn_local_stop.setStyleSheet(_action_btn_qss("btnLocalStop", "#d97706", "#fbbf24", "#b45309", "#fde68a", "#92400e"))
         self.btn_local_stop.clicked.connect(self._save_and_stop)
         ctrl_layout.addWidget(self.btn_local_stop)
+        main_layout.addLayout(ctrl_layout)
 
-        controls_layout.addLayout(ctrl_layout)
-        scroll_controls.setWidget(controls_container)
-        self.main_splitter.addWidget(scroll_controls)
-
-        # Multi-tab view: 1. Live Analysis Console, 2. Local USB Diagnostic Dashboard & Graphs
+        # Full-screen 3-tab view: 1. API Parameters, 2. Live Analysis Console, 3. Graph and Analytics
         self.tab_widget = QTabWidget()
-        self.tab_widget.setMinimumHeight(120)
+        self.tab_widget.setMinimumHeight(200)
         self.tab_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tab_widget.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #1e293b;
-                background-color: #0b1120;
-                border-radius: 6px;
-            }
+            QTabWidget::pane { border: 1px solid #1e293b; background-color: #0b1120; border-radius: 6px; }
             QTabBar::tab {
-                background: #0f172a;
-                color: #94a3b8;
-                padding: 8px 18px;
-                border: 1px solid #1e293b;
-                border-bottom: none;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                font-weight: 600;
-                font-size: 12px;
+                background: #0f172a; color: #94a3b8; padding: 9px 20px; border: 1px solid #1e293b;
+                border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px;
+                font-weight: 600; font-size: 12px;
             }
-            QTabBar::tab:selected {
-                background: #1e293b;
-                color: #38bdf8;
-                border-color: #38bdf8;
-            }
+            QTabBar::tab:selected { background: #1e293b; color: #38bdf8; border-color: #38bdf8; }
         """)
 
-        # Tab 1: Live Analysis Console
+        # TAB 1: API PARAMETERS
+        tab_api_scroll = QScrollArea()
+        tab_api_scroll.setObjectName("scrollControls")
+        tab_api_scroll.setWidgetResizable(True)
+        tab_api_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        tab_api_scroll.setFrameShape(QFrame.NoFrame)
+
+        api_container = QWidget()
+        api_container.setObjectName("controlsContainer")
+        api_layout = QVBoxLayout(api_container)
+        api_layout.setContentsMargins(10, 10, 10, 10)
+        api_layout.setSpacing(12)
+
+        cfg_box = QGroupBox("OPENBENCH CONTRIBUTOR API PARAMETERS (UPSTREAM VARIABLES)")
+        cfg_layout = QVBoxLayout(cfg_box)
+        cfg_layout.setSpacing(12)
+
+        grid_top = QGridLayout()
+        grid_top.setSpacing(10)
+        grid_top.addWidget(QLabel("Custom Engine (--engine):"), 0, 0)
+        self.txt_engine = QLineEdit(self.config.get("openbench", "engine_path", default=""))
+        self.txt_engine.setPlaceholderText("Optional path to custom engine binary (blank = default bundled engine)")
+        self.txt_engine.textChanged.connect(self._update_cmd_preview)
+        grid_top.addWidget(self.txt_engine, 0, 1)
+
+        grid_top.addWidget(QLabel("Syzygy TBs (--syzygy):"), 1, 0)
+        self.txt_syzygy = QLineEdit(self.config.get("openbench", "syzygy_path", default=""))
+        self.txt_syzygy.setPlaceholderText("Directories separated by ; (blank = auto-manage on USB)")
+        self.txt_syzygy.textChanged.connect(self._update_cmd_preview)
+        grid_top.addWidget(self.txt_syzygy, 1, 1)
+        cfg_layout.addLayout(grid_top)
+
+        def wrap_pair(label_txt: str, field: QWidget) -> QWidget:
+            w = QWidget()
+            hl = QHBoxLayout(w)
+            hl.setContentsMargins(0, 0, 6, 0)
+            hl.setSpacing(6)
+            hl.addWidget(QLabel(label_txt))
+            hl.addWidget(field)
+            return w
+
+        grid_num = _FlowLayout(spacing=10)
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["Adaptive", "Balanced", "Maximum", "Custom"])
+        self.combo_mode.setCurrentText(self.config.get("resources", "cpu_mode", default="Adaptive"))
+        self.combo_mode.currentTextChanged.connect(self._on_mode_changed)
+        grid_num.addWidget(wrap_pair("CPU Mode:", self.combo_mode))
+
+        self.spin_threads = QSpinBox()
+        self.spin_threads.setRange(1, self.resource_mgr.logical_cores)
+        self.spin_threads.setValue(self.config.get("resources", "threads", default=4))
+        self.spin_threads.valueChanged.connect(self._update_cmd_preview)
+        grid_num.addWidget(wrap_pair("Threads (-T):", self.spin_threads))
+
+        self.spin_jobs = QSpinBox()
+        self.spin_jobs.setRange(1, 64)
+        self.spin_jobs.setValue(self.config.get("openbench", "jobs", default=1))
+        self.spin_jobs.setToolTip("Number of concurrent analyses to run, splitting -T threads")
+        self.spin_jobs.valueChanged.connect(self._update_cmd_preview)
+        grid_num.addWidget(wrap_pair("Jobs (--jobs):", self.spin_jobs))
+
+        self.spin_hash = QSpinBox()
+        self.spin_hash.setRange(64, 65536)
+        self.spin_hash.setSingleStep(128)
+        self.spin_hash.setValue(self.config.get("resources", "hash_mb", default=1024))
+        self.spin_hash.valueChanged.connect(self._update_cmd_preview)
+        grid_num.addWidget(wrap_pair("Hash MB (--hash):", self.spin_hash))
+
+        self.spin_engine_update_min = QDoubleSpinBox()
+        self.spin_engine_update_min.setRange(0.5, 1440.0)
+        self.spin_engine_update_min.setSingleStep(5.0)
+        self.spin_engine_update_min.setValue(float(self.config.get("openbench", "engine_update_minutes", default=15.0)))
+        self.spin_engine_update_min.valueChanged.connect(self._update_cmd_preview)
+        grid_num.addWidget(wrap_pair("Engine Check Min (--engine-update-minutes):", self.spin_engine_update_min))
+        cfg_layout.addLayout(grid_num)
+
+        chk_layout = _FlowLayout(spacing=14)
+
+        def make_chk(label: str, key: str, default: bool, tip: str = "") -> QCheckBox:
+            cb = QCheckBox(label)
+            if tip:
+                cb.setToolTip(tip)
+            cb.setChecked(self.config.get("openbench", key, default=default))
+            cb.toggled.connect(self._update_cmd_preview)
+            return cb
+
+        self.chk_no_fetch_syzygy = make_chk(
+            "Disable Tablebases (--no-fetch-syzygy)", "no_fetch_syzygy", True,
+            "Checked: skip Syzygy tablebases (saves disk/bandwidth)\nUnchecked: auto-manage tablebases on USB",
+        )
+        self.chk_solve = make_chk("Solve Tasks (--solve)", "solve", False, "Serve exhaustive proof solve tasks")
+        self.chk_no_auto_update = make_chk("No Worker Update (--no-auto-update)", "no_auto_update", False)
+        self.chk_no_engine_update = make_chk("No Engine Update (--no-engine-update)", "no_engine_update", False)
+        self.chk_once = make_chk("Run Once (--once)", "once", False)
+
+        for cb in (
+            self.chk_no_fetch_syzygy, self.chk_solve, self.chk_no_auto_update,
+            self.chk_no_engine_update, self.chk_once,
+        ):
+            chk_layout.addWidget(cb)
+        cfg_layout.addLayout(chk_layout)
+
+        cmd_preview_row = QHBoxLayout()
+        cmd_preview_row.addWidget(QLabel("Command Preview:"))
+        self.lbl_cmd_preview = QLabel("python atomicdb_worker.py ...")
+        self.lbl_cmd_preview.setWordWrap(True)
+        self.lbl_cmd_preview.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px;")
+        cmd_preview_row.addWidget(self.lbl_cmd_preview, 1)
+        cfg_layout.addLayout(cmd_preview_row)
+
+        api_layout.addWidget(cfg_box)
+        api_layout.addStretch()
+        tab_api_scroll.setWidget(api_container)
+        self.tab_widget.addTab(tab_api_scroll, "API Parameters")
+
+        # TAB 2: LIVE ANALYSIS CONSOLE
         tab_console = QWidget()
         tab_console_layout = QVBoxLayout(tab_console)
         tab_console_layout.setContentsMargins(8, 8, 8, 8)
 
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setMinimumHeight(90)
+        self.console.setMinimumHeight(160)
         self.console.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         tab_console_layout.addWidget(self.console)
 
-        console_bar = QHBoxLayout()
+        console_bar = _FlowLayout(spacing=10)
         btn_clear_console = QPushButton("Clear Console Screen")
         btn_clear_console.setStyleSheet("background-color: #1e293b; color: #e2e8f0; border: 1px solid #475569; font-size: 11px; padding: 4px 10px;")
         btn_clear_console.clicked.connect(self.console.clear)
@@ -932,153 +677,146 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.chk_autoscroll.setChecked(True)
         self.chk_autoscroll.setStyleSheet("color: #94a3b8; font-size: 11px;")
         console_bar.addWidget(self.chk_autoscroll)
-
-        console_bar.addStretch()
-        lbl_console_hint = QLabel("Real-time worker stdout stream directly from USB runtime")
-        lbl_console_hint.setStyleSheet("color: #64748b; font-size: 11px;")
-        console_bar.addWidget(lbl_console_hint)
+        lbl_hint = QLabel("Real-time worker stdout stream directly from USB runtime")
+        lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        console_bar.addWidget(lbl_hint)
         tab_console_layout.addLayout(console_bar)
-
         self.tab_widget.addTab(tab_console, "Live Analysis Console")
 
-        # Tab 2: Diagnostic Data Dashboard & Real-Time Graphs
+        # TAB 3: GRAPH AND ANALYTICS
         tab_analytics_scroll = QScrollArea()
         tab_analytics_scroll.setObjectName("scrollAnalytics")
         tab_analytics_scroll.setWidgetResizable(True)
+        tab_analytics_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         tab_analytics_scroll.setFrameShape(QFrame.NoFrame)
-        tab_analytics_scroll.setStyleSheet("QScrollArea#scrollAnalytics { background-color: #0b1120; border: none; }")
-        if tab_analytics_scroll.viewport():
-            tab_analytics_scroll.viewport().setStyleSheet("background-color: #0b1120; border: none;")
 
         tab_analytics_content = QWidget()
         tab_analytics_layout = QVBoxLayout(tab_analytics_content)
-        tab_analytics_layout.setContentsMargins(8, 8, 8, 8)
+        tab_analytics_layout.setContentsMargins(10, 10, 10, 10)
         tab_analytics_layout.setSpacing(10)
 
-        def make_card(title: str, widget: QLabel, subtext: str = ""):
-            box = QWidget()
-            layout = QVBoxLayout(box)
-            layout.setContentsMargins(4, 4, 4, 4)
-            lbl_t = QLabel(title)
-            lbl_t.setStyleSheet("color: #94a3b8; font-size: 10px; text-transform: uppercase; font-weight: 600;")
-            layout.addWidget(lbl_t)
-            layout.addWidget(widget)
-            if subtext:
-                lbl_sub = QLabel(subtext)
-                lbl_sub.setStyleSheet("color: #64748b; font-size: 10px;")
-                layout.addWidget(lbl_sub)
-            return box
+        # System CPU bar at top of Graph and Analytics tab (worker CPU bar removed, extra rounding)
+        cpu_top_row = QHBoxLayout()
+        cpu_top_row.setContentsMargins(2, 2, 2, 2)
+        cpu_top_row.setSpacing(10)
+        lbl_sys_cpu = QLabel("System CPU:")
+        lbl_sys_cpu.setStyleSheet("font-weight: 600; color: #cbd5e1;")
+        cpu_top_row.addWidget(lbl_sys_cpu)
+        self.bar_sys_cpu = QProgressBar()
+        self.bar_sys_cpu.setRange(0, 100)
+        self.bar_sys_cpu.setFixedHeight(22)
+        cpu_top_row.addWidget(self.bar_sys_cpu, 1)
+        tab_analytics_layout.addLayout(cpu_top_row)
 
-        # =========================================================================
-        # 1. CURRENT TASK (REAL-TIME EXECUTION & ESTIMATED COMPLETION)
-        # =========================================================================
+        # Current Task
         grp_cur = QGroupBox("CURRENT TASK (REAL-TIME EXECUTION & ESTIMATED COMPLETION)")
         grp_cur_layout = QVBoxLayout(grp_cur)
+        cur_kpi_layout = _FlowLayout(spacing=8, expand_rows=True)
+        self.lbl_cur_task_id = self._make_kpi("#38bdf8", "IDLE", mono=True)
+        self.lbl_cur_task_nodes = self._make_kpi("#4ade80", "-")
+        self.lbl_cur_task_eta = self._make_kpi("#fbbf24", "Calculating...")
+        self.lbl_cur_nps = self._make_kpi("#a78bfa", "0 /s")
 
-        cur_kpi_layout = QGridLayout()
-        self.lbl_cur_task_id = QLabel("IDLE")
-        self.lbl_cur_task_id.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8; font-family: monospace;")
-        self.lbl_cur_task_nodes = QLabel("-")
-        self.lbl_cur_task_nodes.setStyleSheet("font-size: 18px; font-weight: bold; color: #4ade80;")
-        self.lbl_cur_task_eta = QLabel("Calculating...")
-        self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24;")
-        self.lbl_cur_nps = QLabel("0 /s")
-        self.lbl_cur_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #a78bfa;")
-
-        cur_kpi_layout.addWidget(make_card("Task ID", self.lbl_cur_task_id, "Active worker slot"), 0, 0)
-        cur_kpi_layout.addWidget(make_card("Nodes in Task", self.lbl_cur_task_nodes, "Target search budget"), 0, 1)
-        cur_kpi_layout.addWidget(make_card("Est. Time Remaining", self.lbl_cur_task_eta, "Based on avg NPS of last 3 tasks"), 0, 2)
-        cur_kpi_layout.addWidget(make_card("Current NPS", self.lbl_cur_nps, "Live engine speed"), 0, 3)
+        cur_kpi_layout.addWidget(self._make_card("Task ID", self.lbl_cur_task_id, "Active worker slot"))
+        cur_kpi_layout.addWidget(self._make_card("Nodes in Task", self.lbl_cur_task_nodes, "Target search budget"))
+        cur_kpi_layout.addWidget(self._make_card("Est. Time Remaining", self.lbl_cur_task_eta, "Avg NPS of last 3 tasks"))
+        cur_kpi_layout.addWidget(self._make_card("Current NPS", self.lbl_cur_nps, "Live engine speed"))
         grp_cur_layout.addLayout(cur_kpi_layout)
 
-        # Calculating Line (Monospace display)
         line_box = QHBoxLayout()
         line_box.addWidget(QLabel("Calculating Line:"))
         self.lbl_cur_line = QLabel("Idle (waiting for next task from server)")
+        self.lbl_cur_line.setWordWrap(True)
         self.lbl_cur_line.setStyleSheet(
             "background-color: #020617; color: #38bdf8; border: 1px solid #1e293b; "
-            "padding: 6px 10px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 11px;"
+            "padding: 6px 10px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 12px;"
         )
         self.lbl_cur_line.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         line_box.addWidget(self.lbl_cur_line)
         grp_cur_layout.addLayout(line_box)
 
         lbl_cur_hint = QLabel("Saved automatically to /logs/current_task.log and /logs/activity.log on this USB drive")
-        lbl_cur_hint.setStyleSheet("color: #64748b; font-size: 10px;")
+        lbl_cur_hint.setWordWrap(True)
+        lbl_cur_hint.setStyleSheet("color: #94a3b8; font-size: 12px;")
         grp_cur_layout.addWidget(lbl_cur_hint)
         tab_analytics_layout.addWidget(grp_cur)
 
-        # =========================================================================
-        # 2. SESSION STATISTICS (THIS SESSION)
-        # =========================================================================
+        # Session Statistics
         grp_session = QGroupBox("SESSION STATISTICS (SAVED TO /logs/session_statistics.log)")
         grp_session_layout = QVBoxLayout(grp_session)
-        session_kpi_layout = QGridLayout()
+        session_kpi_layout = _FlowLayout(spacing=8, expand_rows=True)
+        self.lbl_session_tasks = self._make_kpi("#38bdf8", "0")
+        self.lbl_session_nodes = self._make_kpi("#4ade80", "0")
+        self.lbl_session_nps = self._make_kpi("#38bdf8", "0 /s")
+        self.lbl_session_avg_nps = self._make_kpi("#a78bfa", "0 /s")
+        self.lbl_session_nph = self._make_kpi("#fbbf24", "0 /hr")
+        self.lbl_session_uptime = self._make_kpi("#f472b6", "00:00:00", mono=True)
 
-        self.lbl_session_tasks = QLabel("0")
-        self.lbl_session_tasks.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
-        self.lbl_session_nodes = QLabel("0")
-        self.lbl_session_nodes.setStyleSheet("font-size: 18px; font-weight: bold; color: #4ade80;")
-        self.lbl_session_nps = QLabel("0 /s")
-        self.lbl_session_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
-        self.lbl_session_avg_nps = QLabel("0 /s")
-        self.lbl_session_avg_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #a78bfa;")
-        self.lbl_session_uptime = QLabel("00:00:00")
-        self.lbl_session_uptime.setStyleSheet("font-size: 18px; font-weight: bold; color: #f472b6; font-family: monospace;")
-
-        session_kpi_layout.addWidget(make_card("Tasks This Session", self.lbl_session_tasks), 0, 0)
-        session_kpi_layout.addWidget(make_card("Total Nodes This Session", self.lbl_session_nodes), 0, 1)
-        session_kpi_layout.addWidget(make_card("Current NPS", self.lbl_session_nps), 0, 2)
-        session_kpi_layout.addWidget(make_card("Average NPS This Session", self.lbl_session_avg_nps), 0, 3)
-        session_kpi_layout.addWidget(make_card("Session Uptime", self.lbl_session_uptime), 0, 4)
+        for title, lbl, sub in (
+            ("Tasks This Session", self.lbl_session_tasks, "Session count"),
+            ("Total Nodes This Session", self.lbl_session_nodes, "Session nodes"),
+            ("Current NPS", self.lbl_session_nps, "Live speed"),
+            ("Average NPS This Session", self.lbl_session_avg_nps, "Session average"),
+            ("Nodes Per Hour", self.lbl_session_nph, "Session NPH"),
+            ("Session Uptime", self.lbl_session_uptime, "Elapsed time"),
+        ):
+            session_kpi_layout.addWidget(self._make_card(title, lbl, sub))
         grp_session_layout.addLayout(session_kpi_layout)
         tab_analytics_layout.addWidget(grp_session)
 
-        # =========================================================================
-        # 3. LIFETIME STATISTICS (PERMANENT USB REPORT — NEVER CLEARED)
-        # =========================================================================
+        # Lifetime Statistics
         grp_lt = QGroupBox("LIFETIME STATISTICS (SAVED TO /logs/lifetime_statistics.txt — PERMANENTLY PRESERVED)")
         grp_lt_layout = QVBoxLayout(grp_lt)
-        lt_kpi_layout = QGridLayout()
+        lt_kpi_layout = _FlowLayout(spacing=8, expand_rows=True)
+        self.lbl_lt_tasks = self._make_kpi("#38bdf8", "0")
+        self.lbl_lt_nodes = self._make_kpi("#4ade80", "0")
+        self.lbl_lt_avg_nps = self._make_kpi("#fbbf24", "0 /s")
+        self.lbl_lt_nph = self._make_kpi("#34d399", "0 /hr")
+        self.lbl_lt_runtime = self._make_kpi("#a78bfa", "0s")
+        self.lbl_lt_cpu_hours = self._make_kpi("#f472b6", "0.00 hrs")
+        self.lbl_lt_sessions = self._make_kpi("#38bdf8", "1")
 
-        self.lbl_lt_tasks = QLabel("0")
-        self.lbl_lt_tasks.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
-        self.lbl_lt_nodes = QLabel("0")
-        self.lbl_lt_nodes.setStyleSheet("font-size: 18px; font-weight: bold; color: #4ade80;")
-        self.lbl_lt_avg_nps = QLabel("0 /s")
-        self.lbl_lt_avg_nps.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24;")
-        self.lbl_lt_runtime = QLabel("0s")
-        self.lbl_lt_runtime.setStyleSheet("font-size: 18px; font-weight: bold; color: #a78bfa;")
-        self.lbl_lt_cpu_hours = QLabel("0.00 hrs")
-        self.lbl_lt_cpu_hours.setStyleSheet("font-size: 18px; font-weight: bold; color: #f472b6;")
-        self.lbl_lt_sessions = QLabel("1")
-        self.lbl_lt_sessions.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8;")
-
-        lt_kpi_layout.addWidget(make_card("Total Tasks Completed", self.lbl_lt_tasks), 0, 0)
-        lt_kpi_layout.addWidget(make_card("Total Lifetime Nodes", self.lbl_lt_nodes), 0, 1)
-        lt_kpi_layout.addWidget(make_card("Lifetime Average NPS", self.lbl_lt_avg_nps), 0, 2)
-        lt_kpi_layout.addWidget(make_card("Total Accumulated Runtime", self.lbl_lt_runtime), 0, 3)
-        lt_kpi_layout.addWidget(make_card("Total CPU Hours", self.lbl_lt_cpu_hours), 0, 4)
-        lt_kpi_layout.addWidget(make_card("Total Number of Sessions", self.lbl_lt_sessions), 0, 5)
+        for title, lbl, sub in (
+            ("Total Tasks Completed", self.lbl_lt_tasks, "Lifetime tasks"),
+            ("Total Lifetime Nodes", self.lbl_lt_nodes, "Lifetime nodes"),
+            ("Lifetime Average NPS", self.lbl_lt_avg_nps, "Lifetime average"),
+            ("Lifetime NPH", self.lbl_lt_nph, "Lifetime Nodes/Hr"),
+            ("Total Accumulated Runtime", self.lbl_lt_runtime, "Total compute time"),
+            ("Total CPU Hours", self.lbl_lt_cpu_hours, "Thread-hours"),
+            ("Total Number of Sessions", self.lbl_lt_sessions, "Recorded runs"),
+        ):
+            lt_kpi_layout.addWidget(self._make_card(title, lbl, sub))
         grp_lt_layout.addLayout(lt_kpi_layout)
 
         lbl_lt_hint = QLabel("Lifetime statistics are recorded permanently on this USB thumb drive and are strictly preserved across sessions.")
-        lbl_lt_hint.setStyleSheet("color: #64748b; font-size: 10px;")
+        lbl_lt_hint.setWordWrap(True)
+        lbl_lt_hint.setStyleSheet("color: #94a3b8; font-size: 12px;")
         grp_lt_layout.addWidget(lbl_lt_hint)
         tab_analytics_layout.addWidget(grp_lt)
 
-        # =========================================================================
-        # 4. GRAPHS (THIS SESSION — 0.8s TELEMETRY + TIMEFRAME SLIDER)
-        # =========================================================================
-        grp_graphs = QGroupBox("REAL-TIME SESSION GRAPHS (0.8s HARDWARE REFRESH)")
+        # Host Hardware & Graphs (1s Refresh)
+        grp_graphs = QGroupBox("HOST HARDWARE TELEMETRY & REAL-TIME SESSION GRAPHS (1s REFRESH)")
         grp_graphs_outer = QVBoxLayout(grp_graphs)
         grp_graphs_outer.setSpacing(8)
 
-        # Timeframe slider bar with set dials at 1.5 mins, 5 mins, and 10 mins
-        tf_bar = QHBoxLayout()
-        tf_bar.setSpacing(8)
+        ram_row = _FlowLayout(spacing=12)
+        ram_pair = QWidget()
+        ram_pair_l = QHBoxLayout(ram_pair)
+        ram_pair_l.setContentsMargins(0, 0, 0, 0)
+        ram_pair_l.addWidget(QLabel("RAM Allocation:"))
+        self.lbl_ram_details = QLabel("Detecting RAM...")
+        self.lbl_ram_details.setStyleSheet("color: #38bdf8; font-family: monospace;")
+        ram_pair_l.addWidget(self.lbl_ram_details)
+        ram_row.addWidget(ram_pair)
+
+        self.lbl_cores = QLabel(f"Cores: {self.resource_mgr.physical_cores} Physical / {self.resource_mgr.logical_cores} Logical")
+        self.lbl_cores.setStyleSheet("color: #94a3b8;")
+        ram_row.addWidget(self.lbl_cores)
+        grp_graphs_outer.addLayout(ram_row)
+
+        tf_bar = _FlowLayout(spacing=8)
         lbl_tf_title = QLabel("Graph Timeframe:")
-        lbl_tf_title.setStyleSheet("color: #cbd5e1; font-weight: 600; font-size: 11px;")
+        lbl_tf_title.setStyleSheet("color: #cbd5e1; font-weight: 600; font-size: 12px;")
         tf_bar.addWidget(lbl_tf_title)
 
         self.slider_timeframe = QSlider(Qt.Horizontal)
@@ -1089,7 +827,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.slider_timeframe.setTickInterval(1)
         self.slider_timeframe.setTickPosition(QSlider.TicksBelow)
         self.slider_timeframe.setFixedWidth(160)
-        self.slider_timeframe.setValue(1)  # 5 mins default
+        self.slider_timeframe.setValue(1)
         self.slider_timeframe.valueChanged.connect(self._on_timeframe_slider_changed)
         tf_bar.addWidget(self.slider_timeframe)
 
@@ -1101,30 +839,23 @@ class MainWindow(QMainWindow if HAS_QT else object):
             self._tf_dial_buttons.append(dial_btn)
             tf_bar.addWidget(dial_btn)
 
-        tf_bar.addStretch()
         self.lbl_graph_timeframe = QLabel("Window: 5 mins")
-        self.lbl_graph_timeframe.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px; font-weight: 600;")
+        self.lbl_graph_timeframe.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 12px; font-weight: 600;")
         tf_bar.addWidget(self.lbl_graph_timeframe)
         self._update_timeframe_dial_styles(1)
-
         grp_graphs_outer.addLayout(tf_bar)
 
-        grp_graphs_layout = QHBoxLayout()
-        grp_graphs_layout.setSpacing(8)
-
+        grp_graphs_layout = _FlowLayout(spacing=8, expand_rows=True)
         self.chart_cpu = CPUChartWidget()
         self.chart_ram = RAMChartWidget()
         self.chart_nps = NPSChartWidget()
-
-        grp_graphs_layout.addWidget(self.chart_cpu)
-        grp_graphs_layout.addWidget(self.chart_ram)
-        grp_graphs_layout.addWidget(self.chart_nps)
+        for chart in (self.chart_cpu, self.chart_ram, self.chart_nps):
+            chart.setMinimumWidth(260)
+            grp_graphs_layout.addWidget(chart)
         grp_graphs_outer.addLayout(grp_graphs_layout)
         tab_analytics_layout.addWidget(grp_graphs)
 
-        # =========================================================================
-        # 5. PERSISTENT TASK EXECUTION HISTORY
-        # =========================================================================
+        # Persistent Task Execution History
         table_group = QGroupBox("PERSISTENT TASK EXECUTION HISTORY (Saved to USB /logs/history.json)")
         table_layout = QVBoxLayout(table_group)
 
@@ -1133,53 +864,40 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.table_tasks.setHorizontalHeaderLabels(["Timestamp", "Task ID", "Type", "Nodes", "NPS", "TB WDL/DTZ", "Result / Score"])
         self.table_tasks.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_tasks.setAlternatingRowColors(True)
-        self.table_tasks.setMinimumHeight(120)
+        self.table_tasks.setMinimumHeight(180)
         self.table_tasks.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.table_tasks.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.table_tasks.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table_tasks.setStyleSheet("""
             QTableWidget {
-                background-color: #0b1120;
-                alternate-background-color: #0f172a;
-                gridline-color: #1e293b;
-                color: #e2e8f0;
-                font-size: 12px;
-                border: 1px solid #1e293b;
-                border-radius: 4px;
+                background-color: #0b1120; alternate-background-color: #0f172a;
+                gridline-color: #1e293b; color: #e2e8f0; font-size: 12px;
+                border: 1px solid #1e293b; border-radius: 4px;
             }
             QHeaderView::section {
-                background-color: #1e293b;
-                color: #38bdf8;
-                font-weight: 600;
-                padding: 6px;
-                border: none;
+                background-color: #1e293b; color: #38bdf8; font-weight: 600; padding: 6px; border: none;
             }
         """)
         table_layout.addWidget(self.table_tasks)
 
-        storage_bar = QHBoxLayout()
+        storage_bar = _FlowLayout(spacing=8)
         logs_path = os.path.join(self.config.base_dir, "logs")
         self.lbl_storage_info = QLabel(f"USB Storage: {logs_path} (lifetime_statistics.txt, session_statistics.log, current_task.log, history.json)")
-        self.lbl_storage_info.setStyleSheet("color: #64748b; font-size: 11px;")
+        self.lbl_storage_info.setWordWrap(True)
+        self.lbl_storage_info.setStyleSheet("color: #94a3b8; font-size: 12px;")
         storage_bar.addWidget(self.lbl_storage_info)
-        storage_bar.addStretch()
 
         btn_refresh_analytics = QPushButton("Refresh from Disk")
         btn_refresh_analytics.setStyleSheet("background-color: #1e293b; color: #38bdf8; font-size: 11px; padding: 4px 10px;")
         btn_refresh_analytics.clicked.connect(self._refresh_analytics_from_disk)
         storage_bar.addWidget(btn_refresh_analytics)
-
         table_layout.addLayout(storage_bar)
+
         table_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         tab_analytics_layout.addWidget(table_group)
 
         tab_analytics_scroll.setWidget(tab_analytics_content)
-        self.tab_widget.addTab(tab_analytics_scroll, "USB Diagnostic Dashboard & Graphs")
-        self.main_splitter.addWidget(self.tab_widget)
-        self.main_splitter.setStretchFactor(0, 1)
-        self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([380, 460])
-        main_layout.addWidget(self.main_splitter)
+        self.tab_widget.addTab(tab_analytics_scroll, "Graph and Analytics")
+
+        main_layout.addWidget(self.tab_widget, 1)
 
         if self.analytics_logger:
             self._update_analytics_ui(self.analytics_logger.get_summary())
@@ -1187,44 +905,27 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.signals.log_received.connect(self._append_log)
 
     def _update_cmd_preview(self):
-        """Generates real-time preview of the exact invocation command."""
-        t = self.spin_threads.value()
-        h = self.spin_hash.value()
-        j = self.spin_jobs.value()
-        eng = self.txt_engine.text().strip()
-        syz = self.txt_syzygy.text().strip()
-        interval = self.spin_engine_update_min.value()
-
-        parts = [
-            "python atomicdb_worker.py",
-            f"-T {t}",
-            f"--hash {h}"
-        ]
-        if j > 1:
+        parts = ["python atomicdb_worker.py", f"-T {self.spin_threads.value()}", f"--hash {self.spin_hash.value()}"]
+        if (j := self.spin_jobs.value()) > 1:
             parts.append(f"--jobs {j}")
-        if eng:
+        if eng := self.txt_engine.text().strip():
             parts.append(f'--engine "{eng}"')
-        if syz:
+        if syz := self.txt_syzygy.text().strip():
             parts.append(f'--syzygy "{syz}"')
-        if self.chk_no_fetch_syzygy.isChecked():
-            parts.append("--no-fetch-syzygy")
-        else:
-            parts.append("--fetch-syzygy")
+        parts.append("--no-fetch-syzygy" if self.chk_no_fetch_syzygy.isChecked() else "--fetch-syzygy")
         if self.chk_solve.isChecked():
             parts.append("--solve")
         if self.chk_no_auto_update.isChecked():
             parts.append("--no-auto-update")
         if self.chk_no_engine_update.isChecked():
             parts.append("--no-engine-update")
-        if interval != 15.0:
+        if (interval := self.spin_engine_update_min.value()) != 15.0:
             parts.append(f"--engine-update-minutes {interval}")
         if self.chk_once.isChecked():
             parts.append("--once")
-
         self.lbl_cmd_preview.setText(" ".join(parts))
 
     def _save_ui_settings(self):
-        """Persists current UI configuration inputs to config/settings.json."""
         self.config.set("resources", "cpu_mode", self.combo_mode.currentText())
         self.config.set("resources", "threads", self.spin_threads.value())
         self.config.set("resources", "hash_mb", self.spin_hash.value())
@@ -1252,33 +953,24 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
     def _setup_timers(self):
         self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self._poll_tick)
-        self.timer.start(800)  # High-frequency hardware telemetry refresh every 0.8 seconds
-
-        self.eta_timer = QTimer(self)
-        self.eta_timer.setTimerType(Qt.PreciseTimer)
-        self.eta_timer.timeout.connect(self._refresh_eta_1s)
-        self.eta_timer.start(1000)  # Exact 1-second refresh for ETA countdown & session uptime
+        self.timer.start(1000)  # Unified 1-second refresh for ETA, CPU, RAM, and session uptime
 
     def _refresh_eta_1s(self):
-        """Refreshes ETA every 1s, freezes when paused, and resets when worker is stopped/reset."""
         if not self.analytics_logger:
             return
         self.lbl_session_uptime.setText(self.analytics_logger.get_session_uptime_str())
 
-        # If worker stopped cleanly or died unexpectedly, ensure active task ETA resets
         if self.analytics_logger.current_task_id and not self.worker_mgr.is_running and not self.analytics_logger.is_worker_paused:
             self.analytics_logger.reset_current_task()
 
         if self.analytics_logger.current_task_id:
             eta = self.analytics_logger.calculate_estimated_time_remaining()
             self.analytics_logger.current_task_eta_seconds = eta
-            eta_str = self.analytics_logger.format_eta_str(eta)
-            self.lbl_cur_task_eta.setText(eta_str)
-            if eta is not None and eta < 0:
-                self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fb7185; font-family: monospace;")
-            else:
-                self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24; font-family: monospace;")
+            self.lbl_cur_task_eta.setText(self.analytics_logger.format_eta_str(eta))
+            color = "#fb7185" if (eta is not None and eta < 0) else "#fbbf24"
+            self.lbl_cur_task_eta.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color}; font-family: monospace;")
         else:
             self.lbl_cur_task_eta.setText("-")
             self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24;")
@@ -1291,48 +983,29 @@ class MainWindow(QMainWindow if HAS_QT else object):
         avail_ram = snapshot["available_ram_mb"]
 
         self.bar_sys_cpu.setValue(int(sys_cpu))
-        self.bar_worker_cpu.setValue(int(worker_cpu))
         self.lbl_ram_details.setText(f"Worker RSS: {worker_ram} MB | Host Avail: {avail_ram} MB")
 
-        # Feed real-time hardware sample to analytics_logger for session graphs (0.8s cadence)
         if self.analytics_logger:
             self.analytics_logger.set_active_threads(self.spin_threads.value())
             self.analytics_logger.record_hardware_sample(
-                sys_cpu=sys_cpu,
-                worker_cpu=worker_cpu,
-                worker_ram_mb=worker_ram,
-                available_ram_mb=avail_ram
+                sys_cpu=sys_cpu, worker_cpu=worker_cpu, worker_ram_mb=worker_ram, available_ram_mb=avail_ram
             )
             self._update_graph_views()
 
-        # Check adaptive hysteresis (evaluates every 20 seconds internally)
-        allocation_changed = self.resource_mgr.update_adaptive_state(sys_cpu)
-        if allocation_changed and self.worker_mgr.is_running:
+        if self.resource_mgr.update_adaptive_state(sys_cpu) and self.worker_mgr.is_running:
             self._append_log("[ADAPTIVE] System load threshold triggered. Adjusting worker parameters gracefully...")
 
-        # Auto-restore buttons when worker finishes or stops
         if not self.worker_mgr.is_running and (self.btn_stop.isEnabled() or not self.btn_start.isEnabled()):
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
             self.btn_stop.setText("Stop After Finishing Current Task")
-            self._refresh_eta_1s()
+
+        self._refresh_eta_1s()
 
     def _start_worker(self):
         self.config.set("safety", "local_stop_active", False)
         user, pwd = self.config.get_account_credentials()
-        server_url = "https://belzedar.duckdns.org"
-
         threads = self.spin_threads.value()
-        hash_mb = self.spin_hash.value()
-        jobs = self.spin_jobs.value()
-        engine_path = self.txt_engine.text().strip()
-        syzygy_path = self.txt_syzygy.text().strip()
-        no_fetch_syzygy = self.chk_no_fetch_syzygy.isChecked()
-        solve = self.chk_solve.isChecked()
-        no_auto_update = self.chk_no_auto_update.isChecked()
-        no_engine_update = self.chk_no_engine_update.isChecked()
-        engine_update_min = self.spin_engine_update_min.value()
-        once = self.chk_once.isChecked()
 
         if self.analytics_logger:
             self.analytics_logger.set_active_threads(threads)
@@ -1340,27 +1013,19 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         self.btn_stop.setText("Stop After Finishing Current Task")
         started = self.worker_mgr.start_worker(
-            username=user,
-            password=pwd,
-            server_url=server_url,
-            threads=threads,
-            hash_mb=hash_mb,
-            jobs=jobs,
-            engine=engine_path,
-            syzygy=syzygy_path,
-            no_fetch_syzygy=no_fetch_syzygy,
-            solve=solve,
-            no_auto_update=no_auto_update,
-            no_engine_update=no_engine_update,
-            engine_update_minutes=engine_update_min,
-            once=once
+            username=user, password=pwd, server_url="https://belzedar.duckdns.org",
+            threads=threads, hash_mb=self.spin_hash.value(), jobs=self.spin_jobs.value(),
+            engine=self.txt_engine.text().strip(), syzygy=self.txt_syzygy.text().strip(),
+            no_fetch_syzygy=self.chk_no_fetch_syzygy.isChecked(), solve=self.chk_solve.isChecked(),
+            no_auto_update=self.chk_no_auto_update.isChecked(),
+            no_engine_update=self.chk_no_engine_update.isChecked(),
+            engine_update_minutes=self.spin_engine_update_min.value(), once=self.chk_once.isChecked(),
         )
         self.btn_start.setEnabled(not started)
         self.btn_stop.setEnabled(bool(started))
         self._refresh_eta_1s()
 
     def _stop_after_current_task(self):
-        """Stops the worker cleanly right after completing and submitting the current task."""
         if self.worker_mgr.request_stop_after_current_task():
             self.btn_stop.setText("Stopping After Current Task...")
             self.btn_stop.setEnabled(False)
@@ -1370,7 +1035,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
             self.btn_stop.setText("Stop After Finishing Current Task")
 
     def _save_and_stop(self):
-        """Saves configuration, analytics, and lifetime logs to disk, then stops the worker."""
         self._save_ui_settings()
         if self.analytics_logger:
             self.analytics_logger.log_session_event("Save and Stop triggered by user")
@@ -1384,13 +1048,6 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self._refresh_eta_1s()
         self._append_log("[SAVE & STOP] Configuration and statistics saved to portable drive; worker stopped.")
 
-    def _stop_worker(self):
-        self.worker_mgr.stop_worker()
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.setText("Stop After Finishing Current Task")
-        self._refresh_eta_1s()
-
     def _append_log(self, text: str):
         self.console.append(text)
         if getattr(self, "chk_autoscroll", None) and self.chk_autoscroll.isChecked():
@@ -1399,27 +1056,18 @@ class MainWindow(QMainWindow if HAS_QT else object):
             self.console.setTextCursor(cursor)
 
     def _refresh_analytics_from_disk(self):
-        """Reloads analytics and history directly from USB disk."""
         if self.analytics_logger:
             self.analytics_logger.load_persisted_data()
             self._update_analytics_ui(self.analytics_logger.get_summary())
 
     def _update_timeframe_dial_styles(self, active_idx: int):
-        """Highlights the active timeframe dial button (1.5 mins, 5 mins, 10 mins)."""
         for idx, btn in enumerate(getattr(self, "_tf_dial_buttons", [])):
             if idx == active_idx:
-                btn.setStyleSheet(
-                    "background-color: #0284c7; color: #ffffff; border: 1px solid #38bdf8; "
-                    "border-radius: 4px; font-size: 11px; font-weight: 700; padding: 3px 10px;"
-                )
+                btn.setStyleSheet("background-color: #0284c7; color: #ffffff; border: 1px solid #38bdf8; border-radius: 4px; font-size: 11px; font-weight: 700; padding: 3px 10px;")
             else:
-                btn.setStyleSheet(
-                    "background-color: #1e293b; color: #cbd5e1; border: 1px solid #475569; "
-                    "border-radius: 4px; font-size: 11px; font-weight: 600; padding: 3px 10px;"
-                )
+                btn.setStyleSheet("background-color: #1e293b; color: #cbd5e1; border: 1px solid #475569; border-radius: 4px; font-size: 11px; font-weight: 600; padding: 3px 10px;")
 
     def _on_timeframe_slider_changed(self, idx: int):
-        """Handles timeframe slider dial switches across 1.5 mins, 5 mins, and 10 mins."""
         idx = max(0, min(len(self._timeframe_options) - 1, int(idx)))
         label_txt, secs = self._timeframe_options[idx]
         self.graph_timeframe_seconds = secs
@@ -1429,17 +1077,12 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self._update_graph_views()
 
     def _update_graph_views(self, summary: Optional[dict] = None):
-        """Updates CPU, RAM, and NPS charts filtered by the active graph timeframe dial."""
         now = time.time()
         window = getattr(self, "graph_timeframe_seconds", 300)
         if summary is not None:
-            cpu_src = summary.get("cpu_history", [])
-            ram_src = summary.get("ram_history", [])
-            nps_src = summary.get("nps_task_history", [])
+            cpu_src, ram_src, nps_src = summary.get("cpu_history", []), summary.get("ram_history", []), summary.get("nps_task_history", [])
         elif self.analytics_logger:
-            cpu_src = self.analytics_logger.cpu_history
-            ram_src = self.analytics_logger.ram_history
-            nps_src = self.analytics_logger.nps_task_history
+            cpu_src, ram_src, nps_src = self.analytics_logger.cpu_history, self.analytics_logger.ram_history, self.analytics_logger.nps_task_history
         else:
             cpu_src, ram_src, nps_src = [], [], []
 
@@ -1447,35 +1090,22 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.chart_ram.update_data(AnalyticsLogger.filter_history_by_timeframe(ram_src, window, now))
         self.chart_nps.update_data(AnalyticsLogger.filter_history_by_timeframe(nps_src, window, now))
 
-    def _format_nodes(self, n: int) -> str:
-        return format_nodes_compact(n)
-
-    def _format_nps(self, n: int) -> str:
-        if n >= 1_000_000:
-            return f"{n / 1_000_000:.2f} M/s"
-        elif n >= 1_000:
-            return f"{n / 1_000:.1f} k/s"
-        return f"{n:,} /s"
-
     def _update_analytics_ui(self, summary: dict):
-        """Updates all dashboard sections (Current Task, Session, Lifetime, and Graphs)."""
         try:
-            # 1. CURRENT TASK
             cur_id = summary.get("current_task_id")
             if cur_id != self._last_eta_task_id:
                 self._last_eta_task_id = cur_id
-                if cur_id and hasattr(self, "eta_timer"):
-                    self.eta_timer.start(1000)  # Align 1s countdown phase cleanly to new task start
+                if cur_id and hasattr(self, "timer"):
+                    self.timer.start(1000)
+
             if cur_id:
                 self.lbl_cur_task_id.setText(str(cur_id))
-                self.lbl_cur_task_nodes.setText(self._format_nodes(summary.get('current_task_nodes', 0)))
+                self.lbl_cur_task_nodes.setText(format_nodes_compact(summary.get("current_task_nodes", 0)))
                 eta_val = summary.get("current_task_eta_seconds")
                 self.lbl_cur_task_eta.setText(summary.get("current_task_eta_str", "Calculating..."))
-                if eta_val is not None and eta_val < 0:
-                    self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fb7185; font-family: monospace;")
-                else:
-                    self.lbl_cur_task_eta.setStyleSheet("font-size: 18px; font-weight: bold; color: #fbbf24; font-family: monospace;")
-                self.lbl_cur_nps.setText(self._format_nps(summary.get("current_nps", 0)))
+                color = "#fb7185" if (eta_val is not None and eta_val < 0) else "#fbbf24"
+                self.lbl_cur_task_eta.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color}; font-family: monospace;")
+                self.lbl_cur_nps.setText(_format_nps_rate(summary.get("current_nps", 0)))
                 self.lbl_cur_line.setText(summary.get("current_task_line", "Processing search moves..."))
             else:
                 self.lbl_cur_task_id.setText("IDLE")
@@ -1485,55 +1115,42 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 self.lbl_cur_nps.setText("0 /s")
                 self.lbl_cur_line.setText("Idle (waiting for next task from server)")
 
-            # 2. SESSION STATISTICS
             self.lbl_session_tasks.setText(f"{summary.get('session_tasks_completed', 0):,}")
-            self.lbl_session_nodes.setText(self._format_nodes(summary.get("session_total_nodes", 0)))
-            self.lbl_session_nps.setText(self._format_nps(summary.get("current_nps", 0)))
-            self.lbl_session_avg_nps.setText(self._format_nps(summary.get("session_average_nps", 0)))
+            self.lbl_session_nodes.setText(format_nodes_compact(summary.get("session_total_nodes", 0)))
+            self.lbl_session_nps.setText(_format_nps_rate(summary.get("current_nps", 0)))
+            self.lbl_session_avg_nps.setText(_format_nps_rate(summary.get("session_average_nps", 0)))
+            self.lbl_session_nph.setText(format_nph(summary.get("session_nph", 0)))
             self.lbl_session_uptime.setText(summary.get("session_uptime_str", "00:00:00"))
 
-            # 3. LIFETIME STATISTICS
             self.lbl_lt_tasks.setText(f"{summary.get('lifetime_tasks_completed', 0):,}")
-            self.lbl_lt_nodes.setText(self._format_nodes(summary.get("lifetime_total_nodes", 0)))
-            self.lbl_lt_avg_nps.setText(self._format_nps(summary.get("lifetime_average_nps", 0)))
+            self.lbl_lt_nodes.setText(format_nodes_compact(summary.get("lifetime_total_nodes", 0)))
+            self.lbl_lt_avg_nps.setText(_format_nps_rate(summary.get("lifetime_average_nps", 0)))
+            self.lbl_lt_nph.setText(format_nph(summary.get("lifetime_nph", 0)))
             self.lbl_lt_runtime.setText(summary.get("lifetime_total_runtime_str", "0s"))
-            ch = summary.get('lifetime_cpu_hours', 0.0)
+            ch = summary.get("lifetime_cpu_hours", 0.0)
             self.lbl_lt_cpu_hours.setText(f"{ch:.4f} hrs" if (0 < ch < 0.1) else f"{ch:.2f} hrs")
             self.lbl_lt_sessions.setText(f"{summary.get('lifetime_total_sessions', 1):,}")
 
-            # 4. GRAPHS (THIS SESSION, filtered by active timeframe slider)
             self._update_graph_views(summary)
 
-            # 5. RECENT TASKS TABLE
             recent = summary.get("recent_tasks", [])
             self.table_tasks.setRowCount(len(recent))
             for row_idx, task in enumerate(recent):
-                ts = task.get("timestamp", "")
-                if " " in ts:
-                    ts = ts.split(" ")[1]
-                task_id = str(task.get("task_id", ""))
-                task_type = str(task.get("type", "engine")).upper()
-                nodes = self._format_nodes(task.get('nodes', 0))
-                nps = f"{task.get('nps', 0):,}"
-                tb_info = "-"
-                if task.get("wdl") is not None or task.get("tb_wdl") is not None:
-                    w = task.get("wdl") if task.get("wdl") is not None else task.get("tb_wdl")
-                    tb_info = f"wdl={w}"
-                    d = task.get("dtz") if task.get("dtz") is not None else task.get("tb_dtz")
-                    if d is not None:
-                        tb_info += f" dtz={d}"
-                result = str(task.get("summary", ""))
-
-                items = [
-                    QTableWidgetItem(ts),
-                    QTableWidgetItem(task_id),
-                    QTableWidgetItem(task_type),
-                    QTableWidgetItem(nodes),
-                    QTableWidgetItem(nps),
-                    QTableWidgetItem(tb_info),
-                    QTableWidgetItem(result)
-                ]
-                for col_idx, item in enumerate(items):
+                ts = task.get("timestamp", "").split(" ")[-1]
+                w = task.get("wdl") if task.get("wdl") is not None else task.get("tb_wdl")
+                d = task.get("dtz") if task.get("dtz") is not None else task.get("tb_dtz")
+                tb_info = (f"wdl={w}" + (f" dtz={d}" if d is not None else "")) if w is not None else "-"
+                cols = (
+                    ts,
+                    str(task.get("task_id", "")),
+                    str(task.get("type", "engine")).upper(),
+                    format_nodes_compact(task.get("nodes", 0)),
+                    f"{task.get('nps', 0):,}",
+                    tb_info,
+                    str(task.get("summary", "")),
+                )
+                for col_idx, val in enumerate(cols):
+                    item = QTableWidgetItem(val)
                     item.setTextAlignment(Qt.AlignCenter if col_idx < 6 else Qt.AlignLeft | Qt.AlignVCenter)
                     self.table_tasks.setItem(row_idx, col_idx, item)
         except Exception as e:

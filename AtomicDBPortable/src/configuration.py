@@ -14,39 +14,33 @@ logger = logging.getLogger("AtomicDB.Config")
 _BUILTIN_USER_BYTES = (10, 53, 40, 46, 59, 56, 54, 63, 31, 34, 63)
 _BUILTIN_PASS_BYTES = (31, 34, 63, 10, 59, 41, 41, 45, 53, 40, 62)
 
-def _decode_builtin(encoded_bytes: Tuple[int, ...]) -> str:
-    return bytes(b ^ 0x5A for b in encoded_bytes).decode("ascii")
+
+def get_builtin_credentials() -> Tuple[str, str]:
+    return (
+        bytes(b ^ 0x5A for b in _BUILTIN_USER_BYTES).decode("ascii"),
+        bytes(b ^ 0x5A for b in _BUILTIN_PASS_BYTES).decode("ascii"),
+    )
+
 
 ACCOUNT_CONFIG_FILENAME = "account.txt"
-DEFAULT_ACCOUNT_TEMPLATE = (
-    "USERNAME=\n"
-    "PASSWORD=\n"
-)
+DEFAULT_ACCOUNT_TEMPLATE = "USERNAME=\nPASSWORD=\n"
+
 
 def get_base_dir() -> str:
-    """
-    Returns the absolute path to the portable application root.
-    When running as a PyInstaller frozen binary, uses the directory containing the .exe.
-    When running as a script, uses the parent directory of 'src'.
-    """
+    """Returns the portable application root directory."""
     env_root = os.environ.get("ATOMICDB_PORTABLE_ROOT")
     if env_root and os.path.exists(env_root):
         return os.path.abspath(env_root)
-
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.dirname(current_dir)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 class PortableConfig:
-    """Manages configuration file stored strictly on the portable storage device."""
+    """Manages configuration stored strictly on the portable storage device."""
 
     DEFAULT_CONFIG = {
-        "client": {
-            "device_name": "PortableWorker",
-            "standalone": True
-        },
+        "client": {"device_name": "PortableWorker", "standalone": True},
         "openbench": {
             "server": "https://belzedar.duckdns.org",
             "username": "",
@@ -54,30 +48,28 @@ class PortableConfig:
             "jobs": 1,
             "engine_path": "",
             "syzygy_path": "",
-            "no_fetch_syzygy": True,  # User requirement: no tablebase is always enabled by default
+            "no_fetch_syzygy": True,
             "solve": False,
             "no_auto_update": False,
             "no_engine_update": False,
             "engine_update_minutes": 15.0,
-            "once": False
+            "once": False,
         },
         "resources": {
-            "cpu_mode": "Adaptive",  # Default MUST be Adaptive per specifications
+            "cpu_mode": "Adaptive",
             "threads": 4,
             "hash_mb": 1024,
             "max_system_cpu_threshold_pct": 80,
             "hysteresis_cooldown_cycles": 3,
-            "reserved_ram_mb": 1500
+            "reserved_ram_mb": 1500,
         },
         "engine": {
             "selected_binary": "atomic-stockfish-x64-avx2.exe",
             "verify_sha256": True,
             "auto_update": True,
-            "known_good_binary": "atomic-stockfish-x64-modern.exe"
+            "known_good_binary": "atomic-stockfish-x64-modern.exe",
         },
-        "safety": {
-            "local_stop_active": False
-        }
+        "safety": {"local_stop_active": False},
     }
 
     def __init__(self, config_rel_path: str = "config/settings.json"):
@@ -91,11 +83,10 @@ class PortableConfig:
         self.ensure_account_file()
 
     def get_path(self, rel_path: str) -> str:
-        """Resolve a path relative to the portable USB base directory."""
         return os.path.normpath(os.path.join(self.base_dir, rel_path))
 
     def ensure_account_file(self) -> str:
-        """Creates blank account.txt in the portable base directory if it does not already exist."""
+        """Creates blank account.txt in the portable base directory if missing."""
         try:
             if not os.path.exists(self.account_file_path):
                 with open(self.account_file_path, "w", encoding="utf-8") as f:
@@ -110,7 +101,7 @@ class PortableConfig:
     def _read_account_lines(path: str):
         with open(path, "rb") as fb:
             raw = fb.read()
-        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
             text = raw.decode("utf-16")
         elif raw.startswith(b"\xef\xbb\xbf"):
             text = raw.decode("utf-8-sig")
@@ -128,18 +119,15 @@ class PortableConfig:
             return parsed_user, parsed_pass
         for raw_line in self._read_account_lines(path):
             line = raw_line.strip()
-            if not line or line.startswith("#") or line.startswith(";"):
+            if not line or line.startswith(("#", ";")):
                 continue
-            if "=" in line:
-                key, val = line.split("=", 1)
-            elif ":" in line:
-                key, val = line.split(":", 1)
-            else:
+            sep = "=" if "=" in line else (":" if ":" in line else None)
+            if not sep:
                 continue
-            key = key.strip().upper()
-            val = val.strip()
-            if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+            key, val = (p.strip() for p in line.split(sep, 1))
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
                 val = val[1:-1].strip()
+            key = key.upper()
             if key in ("USERNAME", "USER", "ACCOUNT") and val:
                 parsed_user = val
             elif key in ("PASSWORD", "PASS") and val:
@@ -147,13 +135,8 @@ class PortableConfig:
         return parsed_user, parsed_pass
 
     def get_account_credentials(self) -> Tuple[str, str]:
-        """
-        Reads USERNAME and PASSWORD from account.txt in base_dir.
-        When blank or absent, falls back silently to the obfuscated built-in account.
-        """
-        username = _decode_builtin(_BUILTIN_USER_BYTES)
-        password = _decode_builtin(_BUILTIN_PASS_BYTES)
-
+        """Reads USERNAME/PASSWORD from account.txt, falling back to built-in defaults when blank."""
+        username, password = get_builtin_credentials()
         self.ensure_account_file()
         parsed_user: Optional[str] = None
         parsed_pass: Optional[str] = None
@@ -166,41 +149,31 @@ class PortableConfig:
         except Exception as e:
             logger.warning(f"Failed to read {self.account_file_path}; using defaults: {e}")
 
-        if parsed_user:
-            username = parsed_user
-        if parsed_pass:
-            password = parsed_pass
-
-        return username, password
+        return parsed_user or username, parsed_pass or password
 
     def load(self) -> bool:
-        """Load configuration from disk. If not found, initializes default."""
         try:
             if os.path.exists(self.config_path):
                 with open(self.config_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                    self._deep_update(self.data, loaded)
+                    self._deep_update(self.data, json.load(f))
                 logger.info(f"Loaded portable configuration from: {self.config_path}")
                 return True
-            else:
-                logger.info("Configuration file not found. Initializing defaults.")
-                self.save()
-                return True
+            logger.info("Configuration file not found. Initializing defaults.")
+            self.save()
+            return True
         except Exception as e:
             logger.error(f"Failed to load configuration from {self.config_path}: {e}")
             return False
 
     def save(self) -> bool:
-        """Persist configuration to disk."""
         try:
-            if not os.path.exists(self.config_dir):
-                os.makedirs(self.config_dir, exist_ok=True)
+            os.makedirs(self.config_dir, exist_ok=True)
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2)
             return True
         except PermissionError:
             self.is_read_only = True
-            logger.warning(f"Storage medium is read-only. Settings cannot be written to {self.config_path}")
+            logger.warning(f"Storage medium is read-only: {self.config_path}")
             return False
         except Exception as e:
             logger.error(f"Error saving configuration: {e}")
@@ -208,7 +181,7 @@ class PortableConfig:
 
     def _deep_update(self, target: dict, source: dict):
         for k, v in source.items():
-            if isinstance(v, dict) and k in target and isinstance(target[k], dict):
+            if isinstance(v, dict) and isinstance(target.get(k), dict):
                 self._deep_update(target[k], v)
             else:
                 target[k] = v
@@ -225,12 +198,10 @@ class PortableConfig:
     def set(self, *keys_and_value):
         if len(keys_and_value) < 2:
             return
-        keys = keys_and_value[:-1]
-        val = keys_and_value[-1]
         curr = self.data
-        for k in keys[:-1]:
-            if k not in curr or not isinstance(curr[k], dict):
+        for k in keys_and_value[:-2]:
+            if not isinstance(curr.get(k), dict):
                 curr[k] = {}
             curr = curr[k]
-        curr[keys[-1]] = val
+        curr[keys_and_value[-2]] = keys_and_value[-1]
         self.save()

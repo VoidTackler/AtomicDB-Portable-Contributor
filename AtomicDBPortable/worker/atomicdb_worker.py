@@ -1147,7 +1147,7 @@ class Engine:
                 kind, val = m.group(2), int(m.group(3))
                 pv = m.group(4).split()
                 if idx == 1:
-                    print(f"task pv: {' '.join(pv[:10])}", flush=True)
+                    print(f"task pv: {' '.join(pv[:20])}", flush=True)
                 entry = {'move': pv[0], 'pv': pv,
                          'eval_cp': None, 'mate': None,
                          'raw': line.strip()}
@@ -2640,7 +2640,17 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 stop.set()
                 break          # still held: the stop hands it back
             current_task.start(t['id'], t.get('lease_token', ''))
-            print(f"[{slot}] starting task {t['id']} ({t.get('budget_nodes', 0)}n) calculating: {t['fen']}", flush=True)
+            line_moves = None
+            for k in ('line_moves', 'moves', 'line', 'path', 'pgn', 'history', 'uci_moves', 'san_moves'):
+                val = t.get(k)
+                if isinstance(val, (list, tuple)) and val:
+                    line_moves = ' '.join(str(x) for x in val)
+                    break
+                if isinstance(val, str) and val.strip():
+                    line_moves = ' '.join(val.strip().split())
+                    break
+            suffix = f" | line_moves: {line_moves}" if line_moves else ""
+            print(f"[{slot}] starting task {t['id']} ({t.get('budget_nodes', 0)}n) calculating: {t['fen']}{suffix}", flush=True)
             t0 = time.time()
             wdl, dtz = probe_tb(tb, t['fen'])
             if wdl is not None:

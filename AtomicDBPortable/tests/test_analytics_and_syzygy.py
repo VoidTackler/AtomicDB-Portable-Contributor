@@ -160,10 +160,10 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         # With 6M nodes and 2M/s avg NPS, ETA should be integer 3s
         self.assertEqual(summary["current_task_eta_seconds"], 3)
 
-        # Update PV line during search (kept in memory for UI)
+        # Update PV line during search (converted to algebraic notation; no fake opening for non-book FEN)
         self.logger.parse_worker_line("task pv: e6d5 e1e8 g8g7 a5c3")
         summary = self.logger.get_summary()
-        self.assertEqual(summary["current_task_line"], "e6d5 e1e8 g8g7 a5c3")
+        self.assertEqual(summary["current_task_line"], "1... Bxd5 2. Re8+ Kg7 3. Qc3+")
 
         # Simulate 1 second elapsed: ETA reduces by 1s/s
         self.logger.current_task_start_time -= 1.0
@@ -258,23 +258,40 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         with open(gui_path, "r", encoding="utf-8") as f:
             gui_src = f.read()
 
-        # Verify explicit high-contrast styling for Start / Stop After Finishing Current Task / Save and Stop buttons
-        self.assertIn("QPushButton#btnStart", gui_src)
-        self.assertIn("QPushButton#btnStart:disabled", gui_src)
-        self.assertIn("QPushButton#btnStop", gui_src)
-        self.assertIn("QPushButton#btnStop:disabled", gui_src)
-        self.assertIn("QPushButton#btnLocalStop", gui_src)
-        self.assertIn("QPushButton#btnLocalStop:disabled", gui_src)
+        # Verify explicit high-contrast styling & 30px height for Start / Stop After Finishing Current Task / Save and Stop buttons
+        self.assertIn('_action_btn_qss("btnStart"', gui_src)
+        self.assertIn('_action_btn_qss("btnStop"', gui_src)
+        self.assertIn('_action_btn_qss("btnLocalStop"', gui_src)
+        self.assertIn(":disabled", gui_src)
         self.assertIn('QPushButton("Start")', gui_src)
         self.assertIn('QPushButton("Stop After Finishing Current Task")', gui_src)
         self.assertIn('QPushButton("Save and Stop")', gui_src)
+        # Ensure checkbox indicator is green when checked and gray when unchecked
+        self.assertIn("QCheckBox::indicator", gui_src)
+        self.assertIn("background-color: #4b5563", gui_src)
+        self.assertIn("QCheckBox::indicator:checked { background-color: #16a34a;", gui_src)
         # Ensure unscoped controlsContainer stylesheet does not override buttons
-        self.assertIn("QWidget#controlsContainer {", gui_src)
-        # Ensure dedicated 1000ms PreciseTimer for ETA countdown & uptime alongside 800ms telemetry timer
-        self.assertIn("self.timer.start(800)", gui_src)
-        self.assertIn("self.eta_timer.setTimerType(Qt.PreciseTimer)", gui_src)
-        self.assertIn("self.eta_timer.start(1000)", gui_src)
+        self.assertIn("self.setStyleSheet", gui_src)
+        # Ensure unified 1000ms PreciseTimer for ETA, CPU, and RAM (no 0.8s polling)
+        self.assertNotIn("start(800)", gui_src)
+        self.assertNotIn("0.8s", gui_src)
+        self.assertIn("self.timer.setTimerType(Qt.PreciseTimer)", gui_src)
+        self.assertIn("self.timer.start(1000)", gui_src)
         self.assertIn("_refresh_eta_1s", gui_src)
+        # Ensure responsive wrapping, larger aligned analytics subtitles, removed worker CPU bar, and rounded top System CPU bar
+        self.assertIn("class _FlowLayout", gui_src)
+        self.assertIn("Qt.ScrollBarAlwaysOff", gui_src)
+        self.assertIn("font-size: 12px; font-weight: 500;", gui_src)
+        self.assertIn("layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)", gui_src)
+        self.assertIn('("Nodes Per Hour", self.lbl_session_nph, "Session NPH")', gui_src)
+        self.assertIn('("Lifetime NPH", self.lbl_lt_nph, "Lifetime Nodes/Hr")', gui_src)
+        self.assertNotIn("bar_worker_cpu", gui_src)
+        self.assertIn("border-radius: 11px;", gui_src)
+        self.assertIn("border-radius: 10px;", gui_src)
+        self.assertLess(
+            gui_src.index("tab_analytics_layout.addLayout(cpu_top_row)"),
+            gui_src.index('grp_cur = QGroupBox("CURRENT TASK'),
+        )
 
     def test_build_scripts_verify_exe_and_cleanup_temp_bin_files(self):
         root_dir = os.path.dirname(os.path.dirname(__file__))
@@ -285,18 +302,30 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         with open(os.path.join(root_dir, "build.ps1"), "r", encoding="utf-8") as f:
             build_ps1 = f.read()
 
-        # Verify exe existence/size checks before deleting setup/build/temp/.bin files
+        # Verify exe existence/size checks and single-copy move (no duplicate copy in READY_TO_RUN_EXE)
         self.assertIn("getsize(single_exe_path) <= 0", build_py)
+        self.assertIn("shutil.move(single_exe_path, root_exe_path)", build_py)
+        self.assertNotIn("shutil.copy2(single_exe_path, ready_exe_path)", build_py)
+        self.assertNotIn("Copy-Item $singleExe \"READY_TO_RUN_EXE/$exeName\"", build_ps1)
+        self.assertIn("Move-Item $singleExe $exeName", build_ps1)
         self.assertIn('".bin"', build_py)
         self.assertIn('BUILD_ERR=%errorlevel%', build_bat)
         self.assertIn('not exist "Background Processing Utility.exe"', build_bat)
         self.assertIn('*.bin', build_bat)
         self.assertIn('*.bin', build_ps1)
         self.assertIn('account.txt', build_py)
-        self.assertIn('account.txt', build_ps1)
         # Ensure runtime directories are NOT listed for deletion
         for required_runtime in ('"logs"', '"config"', '"syzygy-345"'):
             self.assertNotIn(required_runtime, build_py.split("unnecessary_dirs")[1].split("]")[0])
+
+        # Verify spec excludes unused Qt/crypto bloat and builds fast
+        with open(os.path.join(root_dir, "AtomicDBPortable.spec"), "r", encoding="utf-8") as f:
+            spec_src = f.read()
+        hidden_section = spec_src.split("hiddenimports=[")[1].split("]")[0]
+        self.assertNotIn("'cryptography'", hidden_section)
+        self.assertIn("'cryptography'", spec_src.split("_UNUSED_MODULES = [")[1].split("]")[0])
+        self.assertIn("optimize=1", spec_src)
+        self.assertIn("upx=False", spec_src)
 
     def test_compact_node_formatting(self):
         self.assertEqual(format_nodes_compact(128_000_000), "128m")
@@ -364,12 +393,12 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
 
         self.assertIn('app.setStyle("Fusion")', main_src)
         self.assertIn("QSlider", gui_src)
-        self.assertIn('"1.5 mins", 90', gui_src)
-        self.assertIn('"5 mins", 300', gui_src)
-        self.assertIn('"10 mins", 600', gui_src)
-        self.assertIn("self.btn_start.setMinimumHeight(30)", gui_src)
-        self.assertIn("self.btn_stop.setMinimumHeight(30)", gui_src)
-        self.assertIn("self.btn_local_stop.setMinimumHeight(30)", gui_src)
+        self.assertIn('("1.5 mins", 90)', gui_src)
+        self.assertIn('("5 mins", 300)', gui_src)
+        self.assertIn('("10 mins", 600)', gui_src)
+        self.assertIn("self.btn_start.setFixedHeight(30)", gui_src)
+        self.assertIn("self.btn_stop.setFixedHeight(30)", gui_src)
+        self.assertIn("self.btn_local_stop.setFixedHeight(30)", gui_src)
         self.assertIn("self.btn_start.setStyleSheet", gui_src)
 
     def test_account_txt_credentials_defaults_and_overrides(self):
@@ -628,6 +657,85 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
             self.assertEqual(post_data["username"], "CustomAttrUser")
             self.assertEqual(post_data["password"], "CustomAttrPass")
             self.assertTrue(post_data["machine"].startswith("CustomAttrUser-"))
+
+    def test_nph_lifetime_nph_algebraic_line_and_three_tabs(self):
+        from AtomicDBPortable.src.analytics_logger import format_nph
+        from AtomicDBPortable.src.chess_notation import STANDARD_START_FEN
+
+        # 1. Verify idle state shows no fake example line names
+        self.assertEqual(self.logger.get_summary()["current_task_line"], "Idle (waiting for next task)")
+
+        # 2. Verify algebraic notation + authentic opening name (Center Attack)
+        self.logger.parse_worker_line(f"[0] starting task 8001 (128000000n) calculating: {STANDARD_START_FEN}")
+        self.logger.parse_worker_line(
+            "task pv: g1f3 f7f6 e2e4 d7d5 b1c3 e7e6 d2d4 f8b4 f1d3 g8e7 e1g1 b8c6 c1d2 e8g8 a2a3 b4c3 d2c3 d5e4"
+        )
+        line_8 = self.logger.get_summary()["current_task_line"]
+        # Must output first 8 full moves (16 plies), not stop at 5 moves or include move 9
+        self.assertEqual(
+            line_8,
+            "Center Attack: 1. Nf3 f6 2. e4 d5 3. Nc3 e6 4. d4 Bb4 5. Bd3 Ne7 6. O-O Nbc6 7. Bd2 O-O 8. a3 Bxc3",
+        )
+        self.assertNotIn("9.", line_8)
+
+        # Verify mid-opening FEN (even with fullmove=1 '0 1') recovers moves 1..N instead of mislabeling continuation as 1..5
+        self.logger.parse_worker_line(
+            "[0] starting task 8002 (128000000n) calculating: rnbqkbnr/ppp1p1pp/5p2/3p4/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1"
+        )
+        self.logger.parse_worker_line(
+            "task pv: b1c3 e7e6 d2d4 f8b4 f1d3 g8e7 e1g1 b8c6 c1d2 e8g8 a2a3 b4c3 d2c3 d5e4"
+        )
+        self.assertEqual(
+            self.logger.get_summary()["current_task_line"],
+            "Center Attack: 1. Nf3 f6 2. e4 d5 3. Nc3 e6 4. d4 Bb4 5. Bd3 Ne7 6. O-O Nbc6 7. Bd2 O-O 8. a3 Bxc3",
+        )
+
+        # Verify explicit line_moves from task payload also outputs first 8 moves cleanly
+        self.logger.parse_worker_line(
+            "[0] starting task 8003 (128000000n) calculating: rnbqkbnr/ppp1p1pp/5p2/3p4/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq - 0 1 | line_moves: g1f3 f7f6 e2e4 d7d5 b1c3"
+        )
+        self.logger.parse_worker_line(
+            "task pv: e7e6 d2d4 f8b4 f1d3 g8e7 e1g1 b8c6 c1d2 e8g8 a2a3 b4c3 d2c3 d5e4"
+        )
+        self.assertEqual(
+            self.logger.get_summary()["current_task_line"],
+            "Center Attack: 1. Nf3 f6 2. e4 d5 3. Nc3 e6 4. d4 Bb4 5. Bd3 Ne7 6. O-O Nbc6 7. Bd2 O-O 8. a3 Bxc3",
+        )
+
+        # Verify atomicdb_worker emits pv[:20] (>= 8 full moves) rather than pv[:10] (5 moves)
+        worker_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "worker", "atomicdb_worker.py")
+        with open(worker_path, "r", encoding="utf-8") as f:
+            worker_src = f.read()
+        self.assertIn("pv[:20]", worker_src)
+        self.assertNotIn("pv[:10]", worker_src)
+
+        # 3. Verify Session NPH and Lifetime NPH calculation + formatting + lifetime_statistics.txt
+        self.logger.parse_worker_line("[0] task 8003 (4000000n, 2.00s) -> cp 15")
+        summary = self.logger.get_summary()
+        # 4,000,000 nodes / 2.00s runtime = 2,000,000 NPS = 7,200,000,000 NPH (7.2b /hr)
+        self.assertEqual(summary["lifetime_nph"], 7_200_000_000)
+        self.assertEqual(format_nph(summary["lifetime_nph"]), "7.2b /hr")
+        self.assertGreater(summary["session_nph"], 0)
+
+        txt_file = os.path.join(self.test_dir, "logs", "lifetime_statistics.txt")
+        with open(txt_file, "r", encoding="utf-8") as f:
+            lt_txt = f.read()
+        self.assertIn("Lifetime Nodes/Hour:", lt_txt)
+        self.assertIn("7.2b /hr", lt_txt)
+
+        # 4. Verify GUI has 3 full-screen tabs in exact order:
+        #    API Parameters -> Live Analysis Console -> Graph and Analytics
+        gui_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src", "gui.py")
+        with open(gui_path, "r", encoding="utf-8") as f:
+            gui_src = f.read()
+        self.assertNotIn("self.main_splitter", gui_src)
+        idx_api = gui_src.index('self.tab_widget.addTab(tab_api_scroll, "API Parameters")')
+        idx_console = gui_src.index('self.tab_widget.addTab(tab_console, "Live Analysis Console")')
+        idx_graph = gui_src.index('self.tab_widget.addTab(tab_analytics_scroll, "Graph and Analytics")')
+        self.assertLess(idx_api, idx_console)
+        self.assertLess(idx_console, idx_graph)
+        self.assertIn("self.lbl_session_nph", gui_src)
+        self.assertIn("self.lbl_lt_nph", gui_src)
 
 
 if __name__ == "__main__":
