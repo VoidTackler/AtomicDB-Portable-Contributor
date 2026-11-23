@@ -4,11 +4,18 @@ Converts UCI PV move lists into algebraic notation (SAN) and identifies
 authentic chess / Atomic chess openings without fabricating fake names.
 """
 
+import hashlib
+import html as _html
+import re
+import threading
+import urllib.parse
+import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 FILES = "abcdefgh"
 RANKS = "12345678"
 STANDARD_START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+DEFAULT_ATOMICDB_SERVER = "https://belzedar.duckdns.org"
 
 
 class _BoardState:
@@ -364,6 +371,21 @@ def _clean_task_fen(fen: Optional[str]) -> str:
     return clean_fen
 
 
+def normalize_fen_for_atomicdb(fen: Optional[str]) -> Optional[str]:
+    clean = _clean_task_fen(fen)
+    parts = clean.split()
+    if len(parts) < 4 or "/" not in parts[0]:
+        return None
+    return f"{parts[0]} {parts[1]} {parts[2]} {parts[3]} 0 1"
+
+
+def compute_atomicdb_position_key(fen: Optional[str]) -> Optional[str]:
+    norm = normalize_fen_for_atomicdb(fen)
+    if not norm:
+        return None
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+
 def _is_uci_token(tok: str) -> bool:
     return (
         len(tok) in (4, 5)
@@ -375,9 +397,9 @@ def _is_uci_token(tok: str) -> bool:
 
 def _tokenize_move_seq(moves: Optional[str]) -> List[str]:
     tokens: List[str] = []
-    for raw in (moves or "").strip().split():
+    for raw in (moves or "").replace(",", " ").strip().split():
         cleaned = raw.strip()
-        if not cleaned or cleaned[0].isdigit() and (cleaned.endswith(".") or cleaned.endswith("...")):
+        if not cleaned or (cleaned[0].isdigit() and (cleaned.endswith(".") or cleaned.endswith("..."))):
             continue
         if "." in cleaned and cleaned.split(".", 1)[0].isdigit():
             cleaned = cleaned.split(".", 1)[1].lstrip(".")
@@ -386,26 +408,98 @@ def _tokenize_move_seq(moves: Optional[str]) -> List[str]:
     return tokens
 
 
+def build_atomicdb_explore_url(
+    fen: Optional[str],
+    play_moves: Optional[str] = None,
+    server_url: str = DEFAULT_ATOMICDB_SERVER,
+) -> Optional[str]:
+    key = compute_atomicdb_position_key(fen)
+    if not key:
+        return None
+    base = (server_url or DEFAULT_ATOMICDB_SERVER).rstrip("/")
+    url = f"{base}/atomicdb/explore/{key}/"
+    uci_list = [tok for tok in _tokenize_move_seq(play_moves) if _is_uci_token(tok)]
+    if uci_list:
+        url += f"?play={urllib.parse.quote(','.join(uci_list), safe='')}"
+    return url
+
+
+def parse_atomicdb_explore_html(html_text: str) -> Dict[str, str]:
+    text = html_text or ""
+    opening = ""
+    if m_oname := re.search(r'id="opening-name"[^>]*>(.*?)</h2>', text, re.S | re.I):
+        raw_name = re.sub(r"<[^>]+>", "", m_oname.group(1))
+        cleaned_name = " ".join(_html.unescape(raw_name).split()).strip()
+        if cleaned_name and cleaned_name.lower() != "starting position":
+            opening = cleaned_name
+
+    play_uci = ""
+    if m_play := re.search(r'name="play"[^>]*value="([^"]*)"', text, re.I):
+        play_uci = urllib.parse.unquote(_html.unescape(m_play.group(1))).strip()
+    elif m_cur := re.search(r'class="cur"[^>]*href="[^"]*\?play=([^"&]+)"', text, re.I):
+        play_uci = urllib.parse.unquote(_html.unescape(m_cur.group(1))).strip()
+
+    return {"opening_name": opening, "play_uci": play_uci}
+
+
+_EXPLORE_CACHE_LOCK = threading.Lock()
+_EXPLORE_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def fetch_atomicdb_explore_info(
+    fen: Optional[str],
+    server_url: str = DEFAULT_ATOMICDB_SERVER,
+    timeout: float = 3.0,
+) -> Optional[Dict[str, str]]:
+    key = compute_atomicdb_position_key(fen)
+    if not key:
+        return None
+    with _EXPLORE_CACHE_LOCK:
+        cached = _EXPLORE_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+
+    base = (server_url or DEFAULT_ATOMICDB_SERVER).rstrip("/")
+    explore_url = f"{base}/atomicdb/explore/{key}/"
+    try:
+        req = urllib.request.Request(explore_url, headers={"User-Agent": "AtomicDBPortable/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        info = parse_atomicdb_explore_html(body)
+        info["key"] = key
+        info["url"] = build_atomicdb_explore_url(fen, info.get("play_uci"), server_url) or explore_url
+        with _EXPLORE_CACHE_LOCK:
+            _EXPLORE_CACHE[key] = dict(info)
+        return info
+    except Exception:
+        return None
+
+
 def format_calculating_line(
     fen: Optional[str],
     pv_uci: str,
     prefix_moves: Optional[str] = None,
-    max_moves: int = 8,
+    max_moves: Optional[int] = 8,
+    opening_name: Optional[str] = None,
 ) -> str:
-    """Formats the first 8 moves of the line being worked on in algebraic notation (+ authentic opening name)."""
+    """Formats a line in chronological algebraic notation from the first move (+ opening family)."""
     raw_pv = (pv_uci or "").strip()
     clean_fen = _clean_task_fen(fen)
     if not clean_fen or len(clean_fen.split()) < 2:
         return raw_pv
 
-    max_plies = max(1, int(max_moves)) * 2
+    max_plies = (max(1, int(max_moves)) * 2) if max_moves is not None else None
     fen_key = _BoardState(clean_fen).position_key()
     opening_entry = _OPENING_POSITION_INDEX.get(fen_key)
 
     prefix_san: List[str] = []
-    matched_opening: Optional[str] = None
+    matched_opening: Optional[str] = (
+        opening_name.strip()
+        if (opening_name and opening_name.strip() and opening_name.strip().lower() != "starting position")
+        else None
+    )
 
-    # 1. Prefer explicit line moves from the server if they lead to the task FEN
+    # 1. Prefer explicit chronological moves from move 1 leading to the task FEN
     explicit_tokens = _tokenize_move_seq(prefix_moves)
     if explicit_tokens:
         sim = _BoardState(STANDARD_START_FEN)
@@ -417,29 +511,30 @@ def format_calculating_line(
                 valid_prefix = False
                 break
             replayed_san.append(san)
-            if entry := _OPENING_POSITION_INDEX.get(sim.position_key()):
+            if not matched_opening and (entry := _OPENING_POSITION_INDEX.get(sim.position_key())):
                 matched_opening = entry[0]
         if valid_prefix and sim.position_key() == fen_key:
             prefix_san = replayed_san
 
-    # 2. Otherwise recover the known opening moves from move 1 if the task FEN matches an opening
+    # 2. Otherwise recover known opening moves from move 1 if the task FEN matches an opening
     if not prefix_san and opening_entry is not None:
-        matched_opening, prefix_tuple = opening_entry
-        prefix_san = list(prefix_tuple)
+        if not matched_opening:
+            matched_opening = opening_entry[0]
+        prefix_san = list(opening_entry[1])
 
-    # Replay from STANDARD_START_FEN when we have the prefix from move 1; else start at task FEN
+    # Replay chronologically from move 1 when prefix is known; else format PV from task FEN
     formatted_tokens: List[str] = []
     if prefix_san:
         board = _BoardState(STANDARD_START_FEN)
         for idx, mv_san in enumerate(prefix_san):
-            if len(formatted_tokens) >= max_plies:
+            if max_plies is not None and len(formatted_tokens) >= max_plies:
                 break
             move_turn, move_num = board.turn, board.fullmove
             if board.push_san_simple(mv_san) is None:
                 formatted_tokens = []
                 board = _BoardState(clean_fen)
                 break
-            if entry := _OPENING_POSITION_INDEX.get(board.position_key()):
+            if not opening_name and (entry := _OPENING_POSITION_INDEX.get(board.position_key())):
                 matched_opening = entry[0]
             if move_turn == "w":
                 formatted_tokens.append(f"{move_num}. {mv_san}")
@@ -450,9 +545,8 @@ def format_calculating_line(
     else:
         board = _BoardState(clean_fen)
 
-    # Append PV continuation up to max_moves (16 plies = first 8 full moves)
     for uci in raw_pv.split():
-        if len(formatted_tokens) >= max_plies:
+        if max_plies is not None and len(formatted_tokens) >= max_plies:
             break
         move_turn, move_num = board.turn, board.fullmove
         san = board.push_uci_to_san(uci)
@@ -460,7 +554,7 @@ def format_calculating_line(
             if not formatted_tokens:
                 return raw_pv
             break
-        if entry := _OPENING_POSITION_INDEX.get(board.position_key()):
+        if not opening_name and (entry := _OPENING_POSITION_INDEX.get(board.position_key())):
             matched_opening = entry[0]
         if move_turn == "w":
             formatted_tokens.append(f"{move_num}. {san}")
@@ -475,12 +569,19 @@ def format_calculating_line(
     return f"{matched_opening}: {san_line}" if matched_opening else san_line
 
 
-def format_task_start_line(fen_info: str, prefix_moves: Optional[str] = None, max_moves: int = 8) -> str:
+def format_task_start_line(
+    fen_info: str,
+    prefix_moves: Optional[str] = None,
+    max_moves: Optional[int] = None,
+    opening_name: Optional[str] = None,
+) -> str:
     clean = (fen_info or "").strip()
     if not clean:
         return "Waiting for PV..."
-    formatted = format_calculating_line(clean, "", prefix_moves=prefix_moves, max_moves=max_moves)
+    formatted = format_calculating_line(
+        clean, "", prefix_moves=prefix_moves, max_moves=max_moves, opening_name=opening_name
+    )
     if formatted:
         return formatted
-    opening = identify_opening_for_fen(clean)
+    opening = opening_name or identify_opening_for_fen(clean)
     return f"{opening} ({clean})" if opening else clean

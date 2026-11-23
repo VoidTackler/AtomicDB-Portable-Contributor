@@ -16,6 +16,7 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
         self.logger = AnalyticsLogger(self.test_dir)
+        self.logger.enable_explore_lookup = False
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
@@ -690,7 +691,7 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
             "Center Attack: 1. Nf3 f6 2. e4 d5 3. Nc3 e6 4. d4 Bb4 5. Bd3 Ne7 6. O-O Nbc6 7. Bd2 O-O 8. a3 Bxc3",
         )
 
-        # Verify explicit line_moves from task payload also outputs first 8 moves cleanly
+        # Verify explicit line_moves from task payload prints the exact chronological line from move 1
         self.logger.parse_worker_line(
             "[0] starting task 8003 (128000000n) calculating: rnbqkbnr/ppp1p1pp/5p2/3p4/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq - 0 1 | line_moves: g1f3 f7f6 e2e4 d7d5 b1c3"
         )
@@ -699,7 +700,7 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         )
         self.assertEqual(
             self.logger.get_summary()["current_task_line"],
-            "Center Attack: 1. Nf3 f6 2. e4 d5 3. Nc3 e6 4. d4 Bb4 5. Bd3 Ne7 6. O-O Nbc6 7. Bd2 O-O 8. a3 Bxc3",
+            "Center Attack: 1. Nf3 f6 2. e4 d5 3. Nc3",
         )
 
         # Verify atomicdb_worker emits pv[:20] (>= 8 full moves) rather than pv[:10] (5 moves)
@@ -736,6 +737,69 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         self.assertLess(idx_console, idx_graph)
         self.assertIn("self.lbl_session_nph", gui_src)
         self.assertIn("self.lbl_lt_nph", gui_src)
+
+    def test_atomicdb_explore_chronological_line_and_hyperlink_button(self):
+        from unittest.mock import patch
+        from AtomicDBPortable.src.chess_notation import (
+            build_atomicdb_explore_url,
+            compute_atomicdb_position_key,
+            parse_atomicdb_explore_html,
+        )
+
+        # Exact position and move path from AtomicDB example
+        fen = "rnbqk2r/1pp3pp/p3pp1n/4N3/1b1P4/2N3P1/PPP2P1P/R1BQKB1R b KQkq - 0 1"
+        expected_key = "5ab87694bf1e413b5985016a3b157c51069958dac94b31ff306d1d2c6a562e3f"
+        self.assertEqual(compute_atomicdb_position_key(fen), expected_key)
+
+        play_csv = "g1f3,f7f6,e2e4,d7d5,b1c3,a7a6,d2d4,e7e6,e4d5,g8h6,f3e5,f8b4,g2g3"
+        expected_url = (
+            f"https://belzedar.duckdns.org/atomicdb/explore/{expected_key}/"
+            "?play=g1f3%2Cf7f6%2Ce2e4%2Cd7d5%2Cb1c3%2Ca7a6%2Cd2d4%2Ce7e6%2Ce4d5%2Cg8h6%2Cf3e5%2Cf8b4%2Cg2g3"
+        )
+        self.assertEqual(build_atomicdb_explore_url(fen, play_csv), expected_url)
+
+        sample_html = (
+            '<div class="opening-line"><h2 id="opening-name"><a href="/atomicdb/explore/123/">'
+            'Center Attack</a></h2></div>'
+            f'<input name="play" type="hidden" value="{play_csv}"/>'
+        )
+        parsed = parse_atomicdb_explore_html(sample_html)
+        self.assertEqual(parsed["opening_name"], "Center Attack")
+        self.assertEqual(parsed["play_uci"], play_csv)
+
+        # Simulate AnalyticsLogger resolving explore info (synchronously via patch)
+        self.logger.enable_explore_lookup = True
+        mock_info = {
+            "key": expected_key,
+            "opening_name": "Center Attack",
+            "play_uci": play_csv,
+            "url": expected_url,
+        }
+        with patch("AtomicDBPortable.src.analytics_logger.fetch_atomicdb_explore_info", return_value=mock_info):
+            self.logger.record_task_start("8500", 128000000, fen)
+            # Wait briefly for daemon lookup thread to apply explore info
+            import time as _t
+            deadline = _t.time() + 2.0
+            while _t.time() < deadline and self.logger.get_summary()["current_task_url"] != expected_url:
+                _t.sleep(0.02)
+
+        # Speculative PV after the leaf must NOT overwrite the chronological line from move 1
+        self.logger.parse_worker_line("task pv: h6g4 e5g4 f6f5 g4e5")
+        summary = self.logger.get_summary()
+        self.assertEqual(
+            summary["current_task_line"],
+            "Center Attack: 1. Nf3 f6 2. e4 d5 3. Nc3 a6 4. d4 e6 5. exd5 Nh6 6. Ne5 Bb4 7. g3",
+        )
+        self.assertEqual(summary["current_task_url"], expected_url)
+
+        # Verify GUI contains the clickable Open Line Link button wired to current_task_url
+        gui_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src", "gui.py")
+        with open(gui_path, "r", encoding="utf-8") as f:
+            gui_src = f.read()
+        self.assertIn("self.btn_open_line_url", gui_src)
+        self.assertIn("_open_current_line_url", gui_src)
+        self.assertIn("QDesktopServices.openUrl(QUrl(self._current_line_url))", gui_src)
+        self.assertIn('summary.get("current_task_url")', gui_src)
 
 
 if __name__ == "__main__":

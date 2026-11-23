@@ -29,8 +29,8 @@ try:
         QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
         QSizePolicy, QSlider, QStyle,
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QPointF, QRect, QSize
-    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QPolygonF, QImage, QPixmap
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QPointF, QRect, QSize, QUrl
+    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QPolygonF, QImage, QPixmap, QDesktopServices
     HAS_QT = True
 except ImportError:
     HAS_QT = False
@@ -391,6 +391,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self._timeframe_options = [("1.5 mins", 90), ("5 mins", 300), ("10 mins", 600)]
         self.graph_timeframe_seconds = 300
         self._last_eta_task_id: Optional[str] = None
+        self._current_line_url: Optional[str] = None
 
         self._apply_dark_style()
         self._init_ui()
@@ -724,6 +725,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         grp_cur_layout.addLayout(cur_kpi_layout)
 
         line_box = QHBoxLayout()
+        line_box.setSpacing(8)
         line_box.addWidget(QLabel("Calculating Line:"))
         self.lbl_cur_line = QLabel("Idle (waiting for next task from server)")
         self.lbl_cur_line.setWordWrap(True)
@@ -732,7 +734,16 @@ class MainWindow(QMainWindow if HAS_QT else object):
             "padding: 6px 10px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 12px;"
         )
         self.lbl_cur_line.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        line_box.addWidget(self.lbl_cur_line)
+        line_box.addWidget(self.lbl_cur_line, 1)
+
+        self.btn_open_line_url = QPushButton("Open Line Link")
+        self.btn_open_line_url.setObjectName("btnOpenLineUrl")
+        self.btn_open_line_url.setCursor(Qt.PointingHandCursor)
+        self.btn_open_line_url.setEnabled(False)
+        self.btn_open_line_url.setToolTip("No active task URL")
+        self.btn_open_line_url.setStyleSheet(_action_btn_qss("btnOpenLineUrl", "#0369a1", "#38bdf8", "#0284c7", "#7dd3fc", "#075985"))
+        self.btn_open_line_url.clicked.connect(self._open_current_line_url)
+        line_box.addWidget(self.btn_open_line_url)
         grp_cur_layout.addLayout(line_box)
 
         lbl_cur_hint = QLabel("Saved automatically to /logs/current_task.log and /logs/activity.log on this USB drive")
@@ -1090,6 +1101,10 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.chart_ram.update_data(AnalyticsLogger.filter_history_by_timeframe(ram_src, window, now))
         self.chart_nps.update_data(AnalyticsLogger.filter_history_by_timeframe(nps_src, window, now))
 
+    def _open_current_line_url(self):
+        if self._current_line_url:
+            QDesktopServices.openUrl(QUrl(self._current_line_url))
+
     def _update_analytics_ui(self, summary: dict):
         try:
             cur_id = summary.get("current_task_id")
@@ -1097,6 +1112,12 @@ class MainWindow(QMainWindow if HAS_QT else object):
                 self._last_eta_task_id = cur_id
                 if cur_id and hasattr(self, "timer"):
                     self.timer.start(1000)
+
+            line_url = summary.get("current_task_url") if cur_id else None
+            self._current_line_url = line_url
+            if hasattr(self, "btn_open_line_url"):
+                self.btn_open_line_url.setEnabled(bool(line_url))
+                self.btn_open_line_url.setToolTip(line_url or "No active task URL")
 
             if cur_id:
                 self.lbl_cur_task_id.setText(str(cur_id))

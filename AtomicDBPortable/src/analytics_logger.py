@@ -10,15 +10,28 @@ import time
 import socket
 import platform
 import logging
+import threading
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Callable
 
 logger = logging.getLogger("AtomicDB.Analytics")
 
 try:
-    from .chess_notation import format_calculating_line, format_task_start_line
+    from .chess_notation import (
+        DEFAULT_ATOMICDB_SERVER,
+        build_atomicdb_explore_url,
+        fetch_atomicdb_explore_info,
+        format_calculating_line,
+        format_task_start_line,
+    )
 except (ImportError, ValueError):
-    from chess_notation import format_calculating_line, format_task_start_line
+    from chess_notation import (
+        DEFAULT_ATOMICDB_SERVER,
+        build_atomicdb_explore_url,
+        fetch_atomicdb_explore_info,
+        format_calculating_line,
+        format_task_start_line,
+    )
 
 
 def _format_compact(value: int, unit_suffix: str = "", include_trillions: bool = False) -> str:
@@ -107,6 +120,9 @@ class AnalyticsLogger:
         self.current_task_nodes_done: int = 0
         self.current_task_fen: Optional[str] = None
         self.current_task_line_moves: Optional[str] = None
+        self.current_task_opening: Optional[str] = None
+        self.current_task_url: Optional[str] = None
+        self._current_task_last_pv: Optional[str] = None
         self.current_task_line: str = "Idle (waiting for next task)"
         self.current_task_start_time: Optional[float] = None
         self.current_task_initial_eta_seconds: Optional[int] = None
@@ -114,6 +130,8 @@ class AnalyticsLogger:
         self.is_worker_paused: bool = False
         self.current_task_paused_at: Optional[float] = None
         self.current_task_paused_duration: float = 0.0
+        self.server_url: str = DEFAULT_ATOMICDB_SERVER
+        self.enable_explore_lookup: bool = True
 
         self.cpu_history: List[Dict[str, Any]] = []
         self.ram_history: List[Dict[str, Any]] = []
@@ -235,6 +253,9 @@ class AnalyticsLogger:
         self.current_task_nodes_done = 0
         self.current_task_fen = None
         self.current_task_line_moves = None
+        self.current_task_opening = None
+        self.current_task_url = None
+        self._current_task_last_pv = None
         self.current_task_line = "Idle (waiting for next task)"
         self.current_task_initial_eta_seconds = None
         self.current_task_eta_seconds = None
@@ -360,6 +381,7 @@ class AnalyticsLogger:
                 f"Nodes Done So Far:        {format_nodes_compact(self.current_task_nodes_done)} ({self.current_task_nodes_done:,})\n"
                 f"Estimated Time Remaining: {eta_str}\n"
                 f"Calculating Line:         {self.current_task_line or 'None'}\n"
+                f"Explorer URL:             {self.current_task_url or 'None'}\n"
             )
             with open(self.current_task_file, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -403,10 +425,53 @@ class AnalyticsLogger:
         if uptime > 0 and self.session_total_nodes > 0:
             self.session_average_nps = int(self.session_total_nodes / uptime)
 
+    def _apply_explore_info(self, task_id: str, fen: str, info: Optional[Dict[str, str]]):
+        if not info or self.current_task_id != task_id or self.current_task_fen != fen:
+            return
+        opening = (info.get("opening_name") or "").strip()
+        play_uci = (info.get("play_uci") or "").strip()
+        if opening:
+            self.current_task_opening = opening
+        if play_uci and not self.current_task_line_moves:
+            self.current_task_line_moves = play_uci
+        self.current_task_url = info.get("url") or build_atomicdb_explore_url(
+            fen, self.current_task_line_moves, self.server_url
+        )
+        if self.current_task_line_moves:
+            self.current_task_line = format_calculating_line(
+                fen,
+                "",
+                prefix_moves=self.current_task_line_moves,
+                max_moves=None,
+                opening_name=self.current_task_opening,
+            )
+        elif self._current_task_last_pv:
+            self.current_task_line = format_calculating_line(
+                fen,
+                self._current_task_last_pv,
+                max_moves=8,
+                opening_name=self.current_task_opening,
+            )
+        elif self.current_task_opening:
+            self.current_task_line = format_task_start_line(
+                fen,
+                prefix_moves=self.current_task_line_moves,
+                max_moves=None,
+                opening_name=self.current_task_opening,
+            )
+        self.write_current_task_log()
+        self._notify_listeners()
+
+    def _resolve_explore_async(self, task_id: str, fen: str):
+        info = fetch_atomicdb_explore_info(fen, self.server_url)
+        self._apply_explore_info(task_id, fen, info)
+
     def record_task_start(self, task_id: str, budget_nodes: int, line_info: str):
         self.current_task_id = str(task_id)
         self.current_task_nodes = int(budget_nodes)
         self.current_task_nodes_done = 0
+        self.current_task_opening = None
+        self._current_task_last_pv = None
         raw_info = str(line_info).strip()
         if " | line_moves: " in raw_info:
             fen_part, moves_part = raw_info.split(" | line_moves: ", 1)
@@ -415,8 +480,15 @@ class AnalyticsLogger:
         else:
             self.current_task_fen = raw_info
             self.current_task_line_moves = None
+
+        self.current_task_url = build_atomicdb_explore_url(
+            self.current_task_fen, self.current_task_line_moves, self.server_url
+        )
         self.current_task_line = format_task_start_line(
-            self.current_task_fen, prefix_moves=self.current_task_line_moves, max_moves=8
+            self.current_task_fen,
+            prefix_moves=self.current_task_line_moves,
+            max_moves=None,
+            opening_name=self.current_task_opening,
         )
         self.current_task_start_time = time.time()
         self.is_worker_paused = False
@@ -433,14 +505,36 @@ class AnalyticsLogger:
         self.write_current_task_log()
         self._notify_listeners()
 
+        if (
+            self.enable_explore_lookup
+            and not self.current_task_line_moves
+            and self.current_task_fen
+            and "/" in self.current_task_fen
+            and not self.current_task_fen.lower().startswith("solve ")
+        ):
+            threading.Thread(
+                target=self._resolve_explore_async,
+                args=(self.current_task_id, self.current_task_fen),
+                daemon=True,
+            ).start()
+
     def update_task_progress(self, nodes_done: int, current_nps: int):
         self.current_task_nodes_done = max(self.current_task_nodes_done, int(nodes_done))
         self.current_nps = int(current_nps)
         self._notify_listeners()
 
     def update_task_pv(self, pv_line: str):
+        self._current_task_last_pv = pv_line
+        if self.current_task_line_moves:
+            # Chronological move line from move 1 to the task position is already known;
+            # keep displaying it rather than overwriting with post-FEN search PV.
+            return
         self.current_task_line = format_calculating_line(
-            self.current_task_fen, pv_line, prefix_moves=self.current_task_line_moves, max_moves=8
+            self.current_task_fen,
+            pv_line,
+            prefix_moves=None,
+            max_moves=8,
+            opening_name=self.current_task_opening,
         )
         self._notify_listeners()
 
@@ -611,6 +705,7 @@ class AnalyticsLogger:
             "current_task_nodes": self.current_task_nodes,
             "current_task_nodes_done": self.current_task_nodes_done,
             "current_task_line": self.current_task_line,
+            "current_task_url": self.current_task_url,
             "current_task_eta_seconds": int(eta) if eta is not None else None,
             "current_task_eta_str": self.format_eta_str(eta) if self.current_task_id else "-",
             "lifetime_tasks_completed": self.analytics_data.get("lifetime_tasks_completed", 0),
