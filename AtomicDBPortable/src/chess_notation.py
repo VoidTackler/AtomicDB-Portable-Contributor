@@ -8,9 +8,11 @@ import hashlib
 import html as _html
 import re
 import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 FILES = "abcdefgh"
 RANKS = "12345678"
@@ -432,6 +434,10 @@ def parse_atomicdb_explore_html(html_text: str) -> Dict[str, str]:
         cleaned_name = " ".join(_html.unescape(raw_name).split()).strip()
         if cleaned_name and cleaned_name.lower() != "starting position":
             opening = cleaned_name
+    elif m_op := re.search(r'Last named Atomic opening on this line"[^>]*>(.*?)</span>', text, re.S | re.I):
+        cleaned_name = " ".join(_html.unescape(re.sub(r"<[^>]+>", "", m_op.group(1))).split()).strip()
+        if cleaned_name and cleaned_name.lower() != "starting position":
+            opening = cleaned_name
 
     play_uci = ""
     if m_play := re.search(r'name="play"[^>]*value="([^"]*)"', text, re.I):
@@ -439,11 +445,117 @@ def parse_atomicdb_explore_html(html_text: str) -> Dict[str, str]:
     elif m_cur := re.search(r'class="cur"[^>]*href="[^"]*\?play=([^"&]+)"', text, re.I):
         play_uci = urllib.parse.unquote(_html.unescape(m_cur.group(1))).strip()
 
-    return {"opening_name": opening, "play_uci": play_uci}
+    line_text = ""
+    if m_crumbs := re.search(r'<div[^>]*class="[^"]*crumbs[^"]*"[^>]*>(.*?)</div>', text, re.S | re.I):
+        crumb_plain = " ".join(_html.unescape(re.sub(r"<[^>]+>", " ", m_crumbs.group(1))).split()).strip()
+        if "…" in crumb_plain or "deep line" in crumb_plain.lower():
+            line_text = crumb_plain
+
+    return {"opening_name": opening, "play_uci": play_uci, "line_text": line_text}
+
+
+def _replay_san_line_to_uci(san_text: str) -> Tuple[str, str]:
+    """Replays a full move-1 SAN line into comma-separated UCI moves and normalized board key tuple."""
+    clean = (san_text or "").strip()
+    if not clean or "…" in clean or "..." in clean or "deep line" in clean.lower():
+        return "", ""
+    tokens = _tokenize_move_seq(clean)
+    if not tokens:
+        return "", ""
+    board = _BoardState(STANDARD_START_FEN)
+    ucis: List[str] = []
+    for tok in tokens:
+        uci = board.push_uci_to_san(tok) if _is_uci_token(tok) else None
+        if _is_uci_token(tok):
+            if uci is None:
+                return "", ""
+            ucis.append(tok)
+        else:
+            mv_uci = board.push_san_simple(tok)
+            if mv_uci is None:
+                return "", ""
+            ucis.append(mv_uci)
+    return ",".join(ucis), "|".join(board.position_key())
+
+
+def parse_atomicdb_queue_html(html_text: str) -> Dict[str, Dict[str, str]]:
+    """Extracts live queue line titles, opening families, and playable UCI paths keyed by 64-hex position key."""
+    entries: Dict[str, Dict[str, str]] = {}
+    for item_html in re.findall(r"<li>.*?class=\"qline\".*?</li>", html_text or "", re.S | re.I):
+        m_key = re.search(r'href="/atomicdb/explore/([0-9a-f]{64})/', item_html, re.I)
+        if not m_key:
+            continue
+        key = m_key.group(1).lower()
+        m_title = re.search(r'class="qline"[^>]*title="([^"]*)"', item_html, re.I)
+        m_text = re.search(r'class="qline"[^>]*>(.*?)</a>', item_html, re.S | re.I)
+        title_line = " ".join(_html.unescape(m_title.group(1)).split()).strip() if m_title else ""
+        vis_line = " ".join(_html.unescape(re.sub(r"<[^>]+>", " ", m_text.group(1))).split()).strip() if m_text else ""
+        best_line = title_line or vis_line
+
+        opening = ""
+        if m_op := re.search(r'Last named Atomic opening on this line"[^>]*>(.*?)</span>', item_html, re.S | re.I):
+            opening = " ".join(_html.unescape(re.sub(r"<[^>]+>", "", m_op.group(1))).split()).strip()
+            if opening.lower() == "starting position":
+                opening = ""
+
+        play_uci, _ = _replay_san_line_to_uci(best_line)
+        entries[key] = {
+            "key": key,
+            "opening_name": opening,
+            "play_uci": play_uci,
+            "line_text": best_line,
+        }
+    return entries
+
+
+def format_deep_or_elided_line(line_text: Optional[str], opening_name: Optional[str] = None) -> str:
+    """Normalizes AtomicDB deep/elided lines so opening family comes first and depth prefix is clean."""
+    text = " ".join((line_text or "").replace("\xa0", " ").split()).strip()
+    opening = (
+        opening_name.strip()
+        if (opening_name and opening_name.strip() and opening_name.strip().lower() != "starting position")
+        else ""
+    )
+    if not text:
+        return opening
+
+    # Handle AtomicDB deep lines like: "deep line, ply ≥69 · … Kg6 c8=B Bxd3 h4"
+    m_deep = re.match(r"^(deep line[^·]*?)\s*·\s*(.+)$", text, re.I)
+    if m_deep:
+        depth_label = m_deep.group(1).strip()
+        tail_moves = m_deep.group(2).strip()
+        if opening:
+            return f"{opening} ({depth_label}): {tail_moves}"
+        return f"{depth_label}: {tail_moves}"
+
+    return f"{opening}: {text}" if opening else text
 
 
 _EXPLORE_CACHE_LOCK = threading.Lock()
 _EXPLORE_CACHE: Dict[str, Dict[str, str]] = {}
+_QUEUE_CACHE: Dict[str, Any] = {"ts": 0.0, "entries": {}}
+_EXPLORE_429_UNTIL: float = 0.0
+
+
+def _fetch_atomicdb_queue_index(server_url: str = DEFAULT_ATOMICDB_SERVER, timeout: float = 4.0) -> Dict[str, Dict[str, str]]:
+    now = time.time()
+    with _EXPLORE_CACHE_LOCK:
+        if now - float(_QUEUE_CACHE["ts"]) < 15.0 and _QUEUE_CACHE["entries"]:
+            return dict(_QUEUE_CACHE["entries"])
+    base = (server_url or DEFAULT_ATOMICDB_SERVER).rstrip("/")
+    try:
+        req = urllib.request.Request(f"{base}/atomicdb/", headers={"User-Agent": "AtomicDBPortable/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        parsed = parse_atomicdb_queue_html(body)
+        if parsed:
+            with _EXPLORE_CACHE_LOCK:
+                _QUEUE_CACHE["ts"] = time.time()
+                _QUEUE_CACHE["entries"] = dict(parsed)
+        return parsed
+    except Exception:
+        with _EXPLORE_CACHE_LOCK:
+            return dict(_QUEUE_CACHE["entries"])
 
 
 def fetch_atomicdb_explore_info(
@@ -451,28 +563,52 @@ def fetch_atomicdb_explore_info(
     server_url: str = DEFAULT_ATOMICDB_SERVER,
     timeout: float = 3.0,
 ) -> Optional[Dict[str, str]]:
+    global _EXPLORE_429_UNTIL
     key = compute_atomicdb_position_key(fen)
     if not key:
         return None
     with _EXPLORE_CACHE_LOCK:
         cached = _EXPLORE_CACHE.get(key)
+        in_cooldown = time.time() < _EXPLORE_429_UNTIL
     if cached is not None:
         return dict(cached)
 
     base = (server_url or DEFAULT_ATOMICDB_SERVER).rstrip("/")
     explore_url = f"{base}/atomicdb/explore/{key}/"
-    try:
-        req = urllib.request.Request(explore_url, headers={"User-Agent": "AtomicDBPortable/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-        info = parse_atomicdb_explore_html(body)
-        info["key"] = key
-        info["url"] = build_atomicdb_explore_url(fen, info.get("play_uci"), server_url) or explore_url
-        with _EXPLORE_CACHE_LOCK:
-            _EXPLORE_CACHE[key] = dict(info)
-        return info
-    except Exception:
+    info: Dict[str, str] = {"opening_name": "", "play_uci": "", "line_text": ""}
+
+    if not in_cooldown:
+        try:
+            req = urllib.request.Request(explore_url, headers={"User-Agent": "AtomicDBPortable/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            info = parse_atomicdb_explore_html(body)
+        except urllib.error.HTTPError as err:
+            if err.code == 429:
+                with _EXPLORE_CACHE_LOCK:
+                    _EXPLORE_429_UNTIL = time.time() + 30.0
+        except Exception:
+            pass
+
+    # Merge queue index metadata if explore lacked opening_name/play_uci (e.g. deep line ply >= 69) or hit 429
+    if not info.get("play_uci") or not info.get("opening_name"):
+        q_entry = _fetch_atomicdb_queue_index(server_url).get(key)
+        if q_entry:
+            if not info.get("opening_name") and q_entry.get("opening_name"):
+                info["opening_name"] = q_entry["opening_name"]
+            if not info.get("play_uci") and q_entry.get("play_uci"):
+                info["play_uci"] = q_entry["play_uci"]
+            if not info.get("line_text") and q_entry.get("line_text"):
+                info["line_text"] = q_entry["line_text"]
+
+    if not any(info.get(k) for k in ("opening_name", "play_uci", "line_text")):
         return None
+
+    info["key"] = key
+    info["url"] = build_atomicdb_explore_url(fen, info.get("play_uci"), server_url) or explore_url
+    with _EXPLORE_CACHE_LOCK:
+        _EXPLORE_CACHE[key] = dict(info)
+    return info
 
 
 def format_calculating_line(

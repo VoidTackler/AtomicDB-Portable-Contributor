@@ -377,15 +377,34 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         import time as _t
         now = _t.time()
         series = [
-            {"time": now - 550, "timestamp": "t1", "system_cpu": 10},  # within 10m
-            {"time": now - 250, "timestamp": "t2", "system_cpu": 20},  # within 5m & 10m
-            {"time": now - 45, "timestamp": "t3", "system_cpu": 30},   # within 1.5m, 5m & 10m
+            {"time": now - 3500, "timestamp": "t0", "system_cpu": 10},  # within 1h only
+            {"time": now - 850, "timestamp": "t1", "system_cpu": 20},   # within 15m & 1h
+            {"time": now - 250, "timestamp": "t2", "system_cpu": 30},   # within 5m, 15m & 1h
+            {"time": now - 45, "timestamp": "t3", "system_cpu": 40},    # within 1m, 5m, 15m & 1h
         ]
-        self.assertEqual(len(AnalyticsLogger.filter_history_by_timeframe(series, 90, now)), 1)
+        self.assertEqual(len(AnalyticsLogger.filter_history_by_timeframe(series, 60, now)), 1)
         self.assertEqual(len(AnalyticsLogger.filter_history_by_timeframe(series, 300, now)), 2)
-        self.assertEqual(len(AnalyticsLogger.filter_history_by_timeframe(series, 600, now)), 3)
+        self.assertEqual(len(AnalyticsLogger.filter_history_by_timeframe(series, 900, now)), 3)
+        self.assertEqual(len(AnalyticsLogger.filter_history_by_timeframe(series, 3600, now)), 4)
 
-        # Verify GUI slider dials, Fusion style, and explicit Start Worker button styling
+        # Verify 3 individual data points round/average into 1 for the 1h view, while shorter windows keep 1:1
+        pts_1h = [
+            {"time": now - 10, "timestamp": "00:01", "nps": 100, "avg_nps": 100},
+            {"time": now - 9, "timestamp": "00:02", "nps": 200, "avg_nps": 150},
+            {"time": now - 8, "timestamp": "00:03", "nps": 300, "avg_nps": 200},
+            {"time": now - 7, "timestamp": "00:04", "nps": 400, "avg_nps": 250},
+            {"time": now - 6, "timestamp": "00:05", "nps": 500, "avg_nps": 300},
+            {"time": now - 5, "timestamp": "00:06", "nps": 600, "avg_nps": 350},
+        ]
+        self.assertEqual(len(AnalyticsLogger.aggregate_series_for_timeframe(pts_1h, 900, now)), 6)
+        agg_1h = AnalyticsLogger.aggregate_series_for_timeframe(pts_1h, 3600, now)
+        self.assertEqual(len(agg_1h), 2)
+        self.assertEqual(agg_1h[0]["nps"], 200)
+        self.assertEqual(agg_1h[0]["avg_nps"], 150)
+        self.assertEqual(agg_1h[1]["nps"], 500)
+        self.assertEqual(agg_1h[1]["avg_nps"], 300)
+
+        # Verify GUI slider dials, timeframe options, LiveNPSChartWidget, Fusion style, and explicit button styling
         root_dir = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root_dir, "src", "gui.py"), "r", encoding="utf-8") as f:
             gui_src = f.read()
@@ -394,9 +413,9 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
 
         self.assertIn('app.setStyle("Fusion")', main_src)
         self.assertIn("QSlider", gui_src)
-        self.assertIn('("1.5 mins", 90)', gui_src)
-        self.assertIn('("5 mins", 300)', gui_src)
-        self.assertIn('("10 mins", 600)', gui_src)
+        self.assertIn('[("1 min", 60), ("5 mins", 300), ("15 mins", 900), ("1 h", 3600)]', gui_src)
+        self.assertIn("LiveNPSChartWidget", gui_src)
+        self.assertNotIn("RAMChartWidget", gui_src)
         self.assertIn("self.btn_start.setFixedHeight(30)", gui_src)
         self.assertIn("self.btn_stop.setFixedHeight(30)", gui_src)
         self.assertIn("self.btn_local_stop.setFixedHeight(30)", gui_src)
@@ -801,7 +820,126 @@ class TestAnalyticsAndSyzygy(unittest.TestCase):
         self.assertIn("QDesktopServices.openUrl(QUrl(self._current_line_url))", gui_src)
         self.assertIn('summary.get("current_task_url")', gui_src)
 
+    def test_deep_line_and_elided_queue_line_organization_and_429_fallback(self):
+        import urllib.error
+        from unittest.mock import patch
+        import AtomicDBPortable.src.chess_notation as cn
+
+        deep_key = "9f243aae2a51" + "0" * 52
+        elided_key = "322bba45f84a" + "a" * 52
+        full_18_move_san = (
+            "1. Nh3 f6 2. d4 c6 3. e4 d5 4. Nc3 e6 5. Bd3 Bb4 6. O-O Ne7 "
+            "7. Bd2 O-O 8. Qe1 b6 9. a3 Ba5 10. b4 Bb7 11. Ne2 Nd7 12. Ng3 Qc7 "
+            "13. Qe2 Rac8 14. Qg4 Rfe8 15. Rae1 Nf8 16. Re3 Kf7 17. Rfe1 Kg8 18. Rg3"
+        )
+
+        # Sample queue HTML matching AtomicDB's deep line & elided 18-move line
+        queue_html = f"""
+        <ul>
+          <li>
+            <a class="qline" href="/atomicdb/explore/{deep_key}/" title="deep line, ply ≥69 · … Kg6 c8=B Bxd3 h4">deep line, ply ≥69 · … Kg6 c8=B Bxd3 h4</a>
+            <span title="Last named Atomic opening on this line">bijiy spam</span>
+          </li>
+          <li>
+            <a class="qline" href="/atomicdb/explore/{elided_key}/" title="{full_18_move_san}">1. Nh3 f6 2. d4 c6 … 16. Re3 Kf7 17. Rfe1 Kg8 18. Rg3</a>
+            <span title="Last named Atomic opening on this line">TrojanKnight, Old Defence, 2.d4</span>
+          </li>
+        </ul>
+        """
+        parsed_q = cn.parse_atomicdb_queue_html(queue_html)
+        self.assertEqual(parsed_q[deep_key]["opening_name"], "bijiy spam")
+        self.assertEqual(parsed_q[deep_key]["play_uci"], "")
+        self.assertEqual(parsed_q[deep_key]["line_text"], "deep line, ply ≥69 · … Kg6 c8=B Bxd3 h4")
+
+        self.assertEqual(parsed_q[elided_key]["opening_name"], "TrojanKnight, Old Defence, 2.d4")
+        self.assertTrue(parsed_q[elided_key]["play_uci"].startswith("g1h3,f7f6,d2d4,c7c6"))
+
+        self.assertEqual(
+            cn.format_deep_or_elided_line("deep line, ply ≥69 · … Kg6 c8=B Bxd3 h4", "bijiy spam"),
+            "bijiy spam (deep line, ply ≥69): … Kg6 c8=B Bxd3 h4",
+        )
+
+        # Verify HTTP 429 from /explore/ falls back cleanly to queue HTML index and locks deep line against PV overwrite
+        cn._EXPLORE_CACHE.clear()
+        cn._EXPLORE_429_UNTIL = 0.0
+        cn._QUEUE_CACHE["ts"] = 0.0
+        cn._QUEUE_CACHE["entries"] = {}
+
+        class _FakeResp:
+            def __init__(self, payload: str):
+                self._payload = payload.encode("utf-8")
+
+            def read(self):
+                return self._payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_urlopen(req, timeout=3.0):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "/atomicdb/explore/" in url:
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+            if url.endswith("/atomicdb/"):
+                return _FakeResp(queue_html)
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        fen = "rnbqk2r/1pp3pp/p3pp1n/4N3/1b1P4/2N3P1/PPP2P1P/R1BQKB1R b KQkq - 0 1"
+        with patch("AtomicDBPortable.src.chess_notation.compute_atomicdb_position_key", return_value=deep_key):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                info = cn.fetch_atomicdb_explore_info(fen)
+                self.assertIsNotNone(info)
+                self.assertEqual(info["opening_name"], "bijiy spam")
+                self.assertEqual(info["line_text"], "deep line, ply ≥69 · … Kg6 c8=B Bxd3 h4")
+
+        self.logger.record_task_start("9001", 64000000, fen)
+        self.logger._apply_explore_info("9001", fen, info)
+        # Speculative PV arriving after deep-line resolution must NOT overwrite with "1... ..."
+        self.logger.parse_worker_line("task pv: g6f5 c8d7")
+        self.assertEqual(
+            self.logger.get_summary()["current_task_line"],
+            "bijiy spam (deep line, ply ≥69): … Kg6 c8=B Bxd3 h4",
+        )
+
+    def test_thread_dependent_eta_and_dark_combo_and_live_nps_history(self):
+        # 1. Establish 2 tasks completed at 2 threads -> 1,000,000 NPS each (500k NPS per thread)
+        self.logger.set_active_threads(2)
+        self.logger.parse_worker_line("[0] task 1 (2000000n, 2.00s) -> cp 10")
+        self.logger.parse_worker_line("[0] task 2 (2000000n, 2.00s) -> cp 15")
+        self.assertAlmostEqual(self.logger.get_last_3_avg_nps(), 1_000_000.0, delta=10.0)
+
+        # Doubling threads to 4 before starting a 4,000,000-node task should double expected NPS -> ETA = 2s (instead of 4s)
+        self.logger.set_active_threads(4)
+        self.assertAlmostEqual(self.logger.get_last_3_avg_nps(), 2_000_000.0, delta=10.0)
+        self.logger.parse_worker_line("[0] starting task 9101 (4000000n) calculating: e2e4")
+        self.assertEqual(self.logger.get_summary()["current_task_eta_seconds"], 2)
+
+        # Halving threads mid-task from 4 -> 2 should double remaining ETA from 2s -> 4s
+        self.logger.set_active_threads(2)
+        self.assertEqual(self.logger.get_summary()["current_task_eta_seconds"], 4)
+
+        # 2. Verify live NPS history records samples alongside hardware samples
+        self.logger.record_hardware_sample(sys_cpu=42.0, worker_cpu=35.0, worker_ram_mb=128, available_ram_mb=4096)
+        summary = self.logger.get_summary()
+        self.assertEqual(len(summary["nps_history"]), 1)
+        self.assertIn("nps", summary["nps_history"][0])
+        self.assertIn("avg_nps", summary["nps_history"][0])
+
+        # 3. Verify dark dropdown styling on combo_mode & spin_threads -> _on_threads_changed wiring in gui.py
+        gui_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src", "gui.py")
+        with open(gui_path, "r", encoding="utf-8") as f:
+            gui_src = f.read()
+        self.assertIn("QComboBox QAbstractItemView", gui_src)
+        self.assertIn("self.combo_mode.setView(combo_view)", gui_src)
+        self.assertIn("#1e293b", gui_src)
+        self.assertIn("#f8fafc", gui_src)
+        self.assertIn("self.spin_threads.valueChanged.connect(self._on_threads_changed)", gui_src)
+        self.assertIn("def _on_threads_changed(self, threads: int):", gui_src)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

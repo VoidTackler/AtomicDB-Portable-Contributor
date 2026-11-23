@@ -27,10 +27,10 @@ try:
         QGridLayout, QLayout, QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
         QCheckBox, QProgressBar, QTextEdit, QGroupBox, QLineEdit, QTabWidget,
         QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-        QSizePolicy, QSlider, QStyle,
+        QSizePolicy, QSlider, QStyle, QListView,
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QPointF, QRect, QSize, QUrl
-    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QPolygonF, QImage, QPixmap, QDesktopServices
+    from PySide6.QtGui import QIcon, QFont, QColor, QPainter, QPen, QPolygonF, QImage, QPixmap, QDesktopServices, QPalette
     HAS_QT = True
 except ImportError:
     HAS_QT = False
@@ -278,18 +278,17 @@ class CPUChartWidget(_BaseChartWidget):
         self._draw_x_timestamps(painter, h, pad_l, pw)
 
 
-class RAMChartWidget(_BaseChartWidget):
-    """Real-time chart for Worker RAM (RSS) vs Host Available RAM over time."""
+class LiveNPSChartWidget(_BaseChartWidget):
+    """Real-time line graph of Nodes Per Second (NPS) over time."""
 
     def paintEvent(self, event):
         if not HAS_QT:
             return
-        wrk_ram = self.history[-1].get("worker_ram", 0) if self.history else 0
-        avail_ram = self.history[-1].get("available_ram", 0) if self.history else 0
+        cur_nps = self.history[-1].get("nps", 0) if self.history else 0
         painter, _w, h, pad_l, pad_t, pw, ph = self._begin_frame(
-            "RAM USAGE OVER TIME (MB)", f"RSS: {wrk_ram} MB | Avail: {avail_ram} MB", "#a78bfa"
+            "NPS OVER TIME (LIVE)", f"Cur: {_format_nps_rate(cur_nps)}", "#38bdf8", pad_l=42
         )
-        max_val = max(max([pt.get("worker_ram", 0) for pt in self.history] + [1024]) * 1.3, 2048)
+        max_nps = max(max([pt.get("nps", 0) for pt in self.history] + [100_000]) * 1.2, 500_000)
 
         painter.setPen(QPen(QColor("#1e293b"), 1, Qt.DotLine))
         for pct in (0.33, 0.66):
@@ -298,15 +297,17 @@ class RAMChartWidget(_BaseChartWidget):
 
         painter.setFont(QFont("Consolas", 8))
         painter.setPen(QColor("#64748b"))
-        painter.drawText(4, int(pad_t + 10), f"{int(max_val)}M")
-        painter.drawText(10, int(pad_t + ph), "0M")
+        top_lbl = f"{max_nps / 1_000_000:.1f}M" if max_nps >= 1_000_000 else f"{int(max_nps / 1000)}k"
+        painter.drawText(4, int(pad_t + 10), top_lbl)
+        painter.drawText(14, int(pad_t + ph), "0")
 
         if len(self.history) < 2:
             painter.setPen(QColor("#475569"))
-            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting RAM telemetry (1s)...")
+            painter.drawText(pad_l + pw // 4, pad_t + ph // 2, "Collecting NPS telemetry (1s)...")
             return
 
-        self._draw_polyline(painter, "worker_ram", max_val, pad_l, pad_t, pw, ph, "#a78bfa", 2.0)
+        self._draw_polyline(painter, "avg_nps", max_nps, pad_l, pad_t, pw, ph, "#fbbf24", 1.5)
+        self._draw_polyline(painter, "nps", max_nps, pad_l, pad_t, pw, ph, "#38bdf8", 2.0)
         self._draw_x_timestamps(painter, h, pad_l, pw)
 
 
@@ -388,7 +389,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         else:
             self.resize(1020, 820)
 
-        self._timeframe_options = [("1.5 mins", 90), ("5 mins", 300), ("10 mins", 600)]
+        self._timeframe_options = [("1 min", 60), ("5 mins", 300), ("15 mins", 900), ("1 h", 3600)]
         self.graph_timeframe_seconds = 300
         self._last_eta_task_id: Optional[str] = None
         self._current_line_url: Optional[str] = None
@@ -425,6 +426,19 @@ class MainWindow(QMainWindow if HAS_QT else object):
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
                 background-color: #1e293b; border: 1px solid #334155; padding: 6px 10px;
                 border-radius: 5px; color: #f8fafc; font-family: 'Consolas', 'JetBrains Mono', monospace;
+            }
+            QComboBox::drop-down {
+                border: none; width: 22px; background-color: #1e293b; border-top-right-radius: 5px; border-bottom-right-radius: 5px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e293b; color: #f8fafc; border: 1px solid #38bdf8;
+                selection-background-color: #0284c7; selection-color: #ffffff; outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                background-color: #1e293b; color: #f8fafc; padding: 6px 10px; min-height: 22px;
+            }
+            QComboBox QAbstractItemView::item:selected, QComboBox QAbstractItemView::item:hover {
+                background-color: #0284c7; color: #ffffff;
             }
             QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid #38bdf8; }
             QCheckBox { spacing: 8px; color: #cbd5e1; }
@@ -585,6 +599,19 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         grid_num = _FlowLayout(spacing=10)
         self.combo_mode = QComboBox()
+        combo_view = QListView()
+        combo_pal = combo_view.palette()
+        combo_pal.setColor(QPalette.Base, QColor("#1e293b"))
+        combo_pal.setColor(QPalette.Text, QColor("#f8fafc"))
+        combo_pal.setColor(QPalette.Highlight, QColor("#0284c7"))
+        combo_pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+        combo_view.setPalette(combo_pal)
+        combo_view.setStyleSheet(
+            "QListView { background-color: #1e293b; color: #f8fafc; border: 1px solid #38bdf8; outline: none; }"
+            "QListView::item { background-color: #1e293b; color: #f8fafc; padding: 6px 10px; }"
+            "QListView::item:selected, QListView::item:hover { background-color: #0284c7; color: #ffffff; }"
+        )
+        self.combo_mode.setView(combo_view)
         self.combo_mode.addItems(["Adaptive", "Balanced", "Maximum", "Custom"])
         self.combo_mode.setCurrentText(self.config.get("resources", "cpu_mode", default="Adaptive"))
         self.combo_mode.currentTextChanged.connect(self._on_mode_changed)
@@ -593,7 +620,7 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.spin_threads = QSpinBox()
         self.spin_threads.setRange(1, self.resource_mgr.logical_cores)
         self.spin_threads.setValue(self.config.get("resources", "threads", default=4))
-        self.spin_threads.valueChanged.connect(self._update_cmd_preview)
+        self.spin_threads.valueChanged.connect(self._on_threads_changed)
         grid_num.addWidget(wrap_pair("Threads (-T):", self.spin_threads))
 
         self.spin_jobs = QSpinBox()
@@ -858,9 +885,9 @@ class MainWindow(QMainWindow if HAS_QT else object):
 
         grp_graphs_layout = _FlowLayout(spacing=8, expand_rows=True)
         self.chart_cpu = CPUChartWidget()
-        self.chart_ram = RAMChartWidget()
+        self.chart_live_nps = LiveNPSChartWidget()
         self.chart_nps = NPSChartWidget()
-        for chart in (self.chart_cpu, self.chart_ram, self.chart_nps):
+        for chart in (self.chart_cpu, self.chart_live_nps, self.chart_nps):
             chart.setMinimumWidth(260)
             grp_graphs_layout.addWidget(chart)
         grp_graphs_outer.addLayout(grp_graphs_layout)
@@ -959,8 +986,15 @@ class MainWindow(QMainWindow if HAS_QT else object):
         self.spin_hash.setValue(hash_mb)
         if self.analytics_logger:
             self.analytics_logger.set_active_threads(threads)
+        self._refresh_eta_1s()
         self._append_log(f"[CONFIG] Switched CPU mode to {mode}. Recommended: {threads} threads, {hash_mb}MB hash.")
         self._update_cmd_preview()
+
+    def _on_threads_changed(self, threads: int):
+        self._update_cmd_preview()
+        if self.analytics_logger:
+            self.analytics_logger.set_active_threads(threads)
+        self._refresh_eta_1s()
 
     def _setup_timers(self):
         self.timer = QTimer(self)
@@ -1091,15 +1125,19 @@ class MainWindow(QMainWindow if HAS_QT else object):
         now = time.time()
         window = getattr(self, "graph_timeframe_seconds", 300)
         if summary is not None:
-            cpu_src, ram_src, nps_src = summary.get("cpu_history", []), summary.get("ram_history", []), summary.get("nps_task_history", [])
+            cpu_src = summary.get("cpu_history", [])
+            live_nps_src = summary.get("nps_history", [])
+            nps_src = summary.get("nps_task_history", [])
         elif self.analytics_logger:
-            cpu_src, ram_src, nps_src = self.analytics_logger.cpu_history, self.analytics_logger.ram_history, self.analytics_logger.nps_task_history
+            cpu_src = self.analytics_logger.cpu_history
+            live_nps_src = self.analytics_logger.nps_history
+            nps_src = self.analytics_logger.nps_task_history
         else:
-            cpu_src, ram_src, nps_src = [], [], []
+            cpu_src, live_nps_src, nps_src = [], [], []
 
-        self.chart_cpu.update_data(AnalyticsLogger.filter_history_by_timeframe(cpu_src, window, now))
-        self.chart_ram.update_data(AnalyticsLogger.filter_history_by_timeframe(ram_src, window, now))
-        self.chart_nps.update_data(AnalyticsLogger.filter_history_by_timeframe(nps_src, window, now))
+        self.chart_cpu.update_data(AnalyticsLogger.aggregate_series_for_timeframe(cpu_src, window, now))
+        self.chart_live_nps.update_data(AnalyticsLogger.aggregate_series_for_timeframe(live_nps_src, window, now))
+        self.chart_nps.update_data(AnalyticsLogger.aggregate_series_for_timeframe(nps_src, window, now))
 
     def _open_current_line_url(self):
         if self._current_line_url:

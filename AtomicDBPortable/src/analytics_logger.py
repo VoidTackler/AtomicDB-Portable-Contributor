@@ -22,6 +22,7 @@ try:
         build_atomicdb_explore_url,
         fetch_atomicdb_explore_info,
         format_calculating_line,
+        format_deep_or_elided_line,
         format_task_start_line,
     )
 except (ImportError, ValueError):
@@ -30,6 +31,7 @@ except (ImportError, ValueError):
         build_atomicdb_explore_url,
         fetch_atomicdb_explore_info,
         format_calculating_line,
+        format_deep_or_elided_line,
         format_task_start_line,
     )
 
@@ -113,16 +115,19 @@ class AnalyticsLogger:
         self.session_tasks_completed = 0
         self.session_total_nodes = 0
         self.current_nps = 0
+        self._current_nps_threads = self.active_threads
         self.session_average_nps = 0
 
         self.current_task_id: Optional[str] = None
         self.current_task_nodes: int = 0
         self.current_task_nodes_done: int = 0
+        self.current_task_threads: int = self.active_threads
         self.current_task_fen: Optional[str] = None
         self.current_task_line_moves: Optional[str] = None
         self.current_task_opening: Optional[str] = None
         self.current_task_url: Optional[str] = None
         self._current_task_last_pv: Optional[str] = None
+        self._current_task_line_locked: bool = False
         self.current_task_line: str = "Idle (waiting for next task)"
         self.current_task_start_time: Optional[float] = None
         self.current_task_initial_eta_seconds: Optional[int] = None
@@ -135,6 +140,7 @@ class AnalyticsLogger:
 
         self.cpu_history: List[Dict[str, Any]] = []
         self.ram_history: List[Dict[str, Any]] = []
+        self.nps_history: List[Dict[str, Any]] = []
         self.nps_task_history: List[Dict[str, Any]] = []
 
         self.analytics_data = {
@@ -173,7 +179,33 @@ class AnalyticsLogger:
         self.load_persisted_data()
 
     def set_active_threads(self, threads: int):
-        self.active_threads = max(1, int(threads))
+        new_threads = max(1, int(threads))
+        old_threads = self.active_threads
+        self.active_threads = new_threads
+        if new_threads != old_threads and self.current_task_id and self.current_task_initial_eta_seconds is not None:
+            rem_before = self.calculate_estimated_time_remaining()
+            if rem_before is not None:
+                if self.current_task_nodes_done > 0 and self.current_task_nodes > 0:
+                    expected_nps = self.get_last_3_avg_nps(new_threads)
+                    rem_nodes = max(0, self.current_task_nodes - self.current_task_nodes_done)
+                    new_rem = int(round(float(rem_nodes) / float(expected_nps))) if expected_nps > 0 else rem_before
+                elif rem_before > 0:
+                    new_rem = max(1, int(round(float(rem_before) * (float(old_threads) / float(new_threads)))))
+                else:
+                    new_rem = rem_before
+
+                now_ref = (
+                    self.current_task_paused_at
+                    if (self.is_worker_paused and self.current_task_paused_at is not None)
+                    else time.time()
+                )
+                self.current_task_threads = new_threads
+                self.current_task_initial_eta_seconds = int(new_rem)
+                self.current_task_start_time = now_ref
+                self.current_task_paused_duration = 0.0
+                self.current_task_eta_seconds = int(new_rem)
+                self.write_current_task_log()
+                self._notify_listeners()
 
     def add_listener(self, callback: Callable[[Dict[str, Any]], None]):
         self.listeners.append(callback)
@@ -192,16 +224,29 @@ class AnalyticsLogger:
     def get_session_uptime_str(self) -> str:
         return format_uptime_digital(self.get_session_uptime())
 
-    def get_last_3_avg_nps(self) -> float:
-        """Average NPS of up to the last 3 completed search tasks (divides by 1 or 2 when fewer done)."""
-        session_recent = [t["nps"] for t in self.nps_task_history if t.get("nps", 0) > 0][-3:]
+    def get_last_3_avg_nps(self, target_threads: Optional[int] = None) -> float:
+        """Thread-adjusted avg NPS of up to the last 3 completed search tasks (scaled to active_threads)."""
+        t_use = max(1, int(target_threads)) if target_threads is not None else max(1, int(self.active_threads))
+
+        def _scaled(items: List[Dict[str, Any]]) -> List[float]:
+            vals: List[float] = []
+            for t in items:
+                nps_val = float(t.get("nps", 0) or 0)
+                if nps_val <= 0:
+                    continue
+                t_task = max(1, int(t.get("threads") or t_use))
+                vals.append((nps_val / float(t_task)) * float(t_use))
+            return vals
+
+        session_recent = _scaled(self.nps_task_history)[-3:]
         if session_recent:
             return sum(session_recent) / len(session_recent)
-        recent_nps = [t["nps"] for t in self.tasks_history if t.get("nps", 0) > 0][-3:]
+        recent_nps = _scaled(self.tasks_history)[-3:]
         if recent_nps:
             return sum(recent_nps) / len(recent_nps)
         if self.current_nps > 0:
-            return float(self.current_nps)
+            t_cur = max(1, int(getattr(self, "_current_nps_threads", t_use) or t_use))
+            return (float(self.current_nps) / float(t_cur)) * float(t_use)
         uptime = self.get_session_uptime()
         if self.session_total_nodes > 0 and uptime > 0:
             return self.session_total_nodes / uptime
@@ -216,6 +261,41 @@ class AnalyticsLogger:
             return []
         cutoff = (time.time() if now is None else float(now)) - float(timeframe_seconds)
         return [pt for pt in series if float(pt.get("time", 0.0)) >= cutoff]
+
+    @staticmethod
+    def aggregate_series_for_timeframe(
+        series: List[Dict[str, Any]],
+        timeframe_seconds: float,
+        now: Optional[float] = None,
+        group_size_for_1h: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Filters series by timeframe and rounds every 3 points into 1 for the 1h view."""
+        filtered = AnalyticsLogger.filter_history_by_timeframe(series, timeframe_seconds, now)
+        if not filtered or float(timeframe_seconds) < 3600.0 or group_size_for_1h <= 1:
+            return filtered
+
+        grouped: List[Dict[str, Any]] = []
+        step = max(1, int(group_size_for_1h))
+        for i in range(0, len(filtered), step):
+            chunk = filtered[i : i + step]
+            if len(chunk) == 1:
+                grouped.append(dict(chunk[0]))
+                continue
+            avg_pt: Dict[str, Any] = {}
+            mid = chunk[-1]
+            for k, sample_v in mid.items():
+                if k == "timestamp":
+                    avg_pt[k] = mid[k]
+                elif isinstance(sample_v, bool):
+                    avg_pt[k] = sample_v
+                elif isinstance(sample_v, int):
+                    avg_pt[k] = int(round(sum(float(c.get(k, 0)) for c in chunk) / len(chunk)))
+                elif isinstance(sample_v, float):
+                    avg_pt[k] = round(sum(float(c.get(k, 0.0)) for c in chunk) / len(chunk), 3 if k == "time" else 1)
+                else:
+                    avg_pt[k] = sample_v
+            grouped.append(avg_pt)
+        return grouped
 
     def calculate_estimated_time_remaining(self) -> Optional[int]:
         """Whole-second ETA stepping down 1s/s, pausing when worker is paused, negative when overdue."""
@@ -256,6 +336,7 @@ class AnalyticsLogger:
         self.current_task_opening = None
         self.current_task_url = None
         self._current_task_last_pv = None
+        self._current_task_line_locked = False
         self.current_task_line = "Idle (waiting for next task)"
         self.current_task_initial_eta_seconds = None
         self.current_task_eta_seconds = None
@@ -403,7 +484,7 @@ class AnalyticsLogger:
             logger.debug(f"Error appending to session_statistics.log: {e}")
 
     def record_hardware_sample(self, sys_cpu: float, worker_cpu: float, worker_ram_mb: int, available_ram_mb: int):
-        """Records a real-time CPU & RAM sample for session graphs (retained >10m at 1s refresh)."""
+        """Records 1s CPU, RAM, and live NPS telemetry (retains >= 1h / 3700 samples)."""
         now = time.time()
         ts_str = datetime.now().strftime("%H:%M:%S")
 
@@ -411,25 +492,33 @@ class AnalyticsLogger:
             "time": now, "timestamp": ts_str,
             "system_cpu": round(float(sys_cpu), 1), "worker_cpu": round(float(worker_cpu), 1),
         })
-        if len(self.cpu_history) > 700:
+        if len(self.cpu_history) > 3700:
             self.cpu_history.pop(0)
 
         self.ram_history.append({
             "time": now, "timestamp": ts_str,
             "worker_ram": int(worker_ram_mb), "available_ram": int(available_ram_mb),
         })
-        if len(self.ram_history) > 700:
+        if len(self.ram_history) > 3700:
             self.ram_history.pop(0)
 
         uptime = self.get_session_uptime()
         if uptime > 0 and self.session_total_nodes > 0:
             self.session_average_nps = int(self.session_total_nodes / uptime)
 
+        self.nps_history.append({
+            "time": now, "timestamp": ts_str,
+            "nps": int(self.current_nps), "avg_nps": int(self.session_average_nps),
+        })
+        if len(self.nps_history) > 3700:
+            self.nps_history.pop(0)
+
     def _apply_explore_info(self, task_id: str, fen: str, info: Optional[Dict[str, str]]):
         if not info or self.current_task_id != task_id or self.current_task_fen != fen:
             return
         opening = (info.get("opening_name") or "").strip()
         play_uci = (info.get("play_uci") or "").strip()
+        line_text = (info.get("line_text") or "").strip()
         if opening:
             self.current_task_opening = opening
         if play_uci and not self.current_task_line_moves:
@@ -438,6 +527,7 @@ class AnalyticsLogger:
             fen, self.current_task_line_moves, self.server_url
         )
         if self.current_task_line_moves:
+            self._current_task_line_locked = True
             self.current_task_line = format_calculating_line(
                 fen,
                 "",
@@ -445,6 +535,9 @@ class AnalyticsLogger:
                 max_moves=None,
                 opening_name=self.current_task_opening,
             )
+        elif line_text:
+            self._current_task_line_locked = True
+            self.current_task_line = format_deep_or_elided_line(line_text, self.current_task_opening)
         elif self._current_task_last_pv:
             self.current_task_line = format_calculating_line(
                 fen,
@@ -470,8 +563,10 @@ class AnalyticsLogger:
         self.current_task_id = str(task_id)
         self.current_task_nodes = int(budget_nodes)
         self.current_task_nodes_done = 0
+        self.current_task_threads = self.active_threads
         self.current_task_opening = None
         self._current_task_last_pv = None
+        self._current_task_line_locked = False
         raw_info = str(line_info).strip()
         if " | line_moves: " in raw_info:
             fen_part, moves_part = raw_info.split(" | line_moves: ", 1)
@@ -480,6 +575,9 @@ class AnalyticsLogger:
         else:
             self.current_task_fen = raw_info
             self.current_task_line_moves = None
+
+        if self.current_task_line_moves:
+            self._current_task_line_locked = True
 
         self.current_task_url = build_atomicdb_explore_url(
             self.current_task_fen, self.current_task_line_moves, self.server_url
@@ -521,13 +619,14 @@ class AnalyticsLogger:
     def update_task_progress(self, nodes_done: int, current_nps: int):
         self.current_task_nodes_done = max(self.current_task_nodes_done, int(nodes_done))
         self.current_nps = int(current_nps)
+        self._current_nps_threads = self.active_threads
         self._notify_listeners()
 
     def update_task_pv(self, pv_line: str):
         self._current_task_last_pv = pv_line
-        if self.current_task_line_moves:
-            # Chronological move line from move 1 to the task position is already known;
-            # keep displaying it rather than overwriting with post-FEN search PV.
+        if self.current_task_line_moves or self._current_task_line_locked:
+            # Chronological move line from move 1 (or verified AtomicDB deep-line tail) is already set;
+            # keep displaying it rather than overwriting with post-FEN PV numbered from 1.
             return
         self.current_task_line = format_calculating_line(
             self.current_task_fen,
@@ -545,12 +644,13 @@ class AnalyticsLogger:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         nps = int(nodes / elapsed_sec) if elapsed_sec > 0 else 0
         self.current_nps = nps
+        self._current_nps_threads = self.active_threads
         task_type = "Tablebase" if is_tb else ("Solve" if is_solve else "Engine")
 
         item: Dict[str, Any] = {
             "task_id": str(task_id), "timestamp": timestamp, "device": self.device_name,
             "type": task_type, "nodes": int(nodes), "elapsed_sec": round(float(elapsed_sec), 2),
-            "nps": nps, "summary": str(summary).strip(),
+            "nps": nps, "threads": self.active_threads, "summary": str(summary).strip(),
         }
         if wdl is not None:
             item["wdl"] = item["tb_wdl"] = int(wdl)
@@ -566,11 +666,11 @@ class AnalyticsLogger:
         self.session_average_nps = int(self.session_total_nodes / max(1.0, self.get_session_uptime()))
 
         self.nps_task_history.append({
-            "task_id": str(task_id), "nps": nps, "nodes": int(nodes),
+            "task_id": str(task_id), "nps": nps, "nodes": int(nodes), "threads": self.active_threads,
             "elapsed": round(float(elapsed_sec), 2), "device": self.device_name,
             "timestamp": datetime.now().strftime("%H:%M:%S"), "time": time.time(),
         })
-        if len(self.nps_task_history) > 500:
+        if len(self.nps_task_history) > 1000:
             self.nps_task_history.pop(0)
 
         ad = self.analytics_data
@@ -716,10 +816,11 @@ class AnalyticsLogger:
             "lifetime_total_runtime_str": format_duration(lt_runtime),
             "lifetime_cpu_hours": round(self.analytics_data.get("lifetime_cpu_hours", 0.0), 4),
             "lifetime_total_sessions": self.analytics_data.get("lifetime_total_sessions", 1),
-            # Graph series (this session, retaining >10 minutes at 1s refresh)
-            "cpu_history": list(self.cpu_history[-700:]),
-            "ram_history": list(self.ram_history[-700:]),
-            "nps_task_history": list(self.nps_task_history[-200:]),
+            # Graph series (this session, retaining >= 1 hour at 1s refresh)
+            "cpu_history": list(self.cpu_history[-3700:]),
+            "ram_history": list(self.ram_history[-3700:]),
+            "nps_history": list(self.nps_history[-3700:]),
+            "nps_task_history": list(self.nps_task_history[-1000:]),
             "recent_tasks": list(reversed(self.tasks_history[-100:])),
         }
 
